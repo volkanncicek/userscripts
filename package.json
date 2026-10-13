@@ -1,0 +1,26 @@
+{
+  "name": "userscripts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "npm run scripts && npm run lint && npm run format:check && npm run versions",
+    "prepare": "git config core.hooksPath .githooks",
+    "scripts": "node tools/check-scripts.mjs",
+    "versions": "node tools/check-versions.mjs",
+    "lint": "eslint .",
+    "format": "prettier --write \"*.user.js\" \"tools/*.mjs\" eslint.config.mjs",
+    "format:check": "prettier --check \"*.user.js\" \"tools/*.mjs\" eslint.config.mjs"
+  },
+  "userscripts": {
+    "namespace": "github.com/volkanncicek/userscripts",
+    "url": "https://raw.githubusercontent.com/volkanncicek/userscripts/main/{file}"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.0",
+    "eslint": "^10.12.0",
+    "eslint-plugin-userscripts": "^0.5.6",
+    "espree": "^11.2.0",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.10"
+  }
+}

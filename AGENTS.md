@@ -1,0 +1,25 @@
+# AGENTS.md
+
+This repo is the source of truth for the userscripts installed in the browser; the browser holds copies.
+
+- **Set `@version` to the day's date (`YYYY.MM.DD`, then `.1`, `.2` for further changes that day) with every behaviour change.** Tampermonkey fetches an update only when the remote version is higher, so a change pushed under the old version never reaches the browser and nothing reports it. A date also stays above any version an installed copy can still carry, which a hand-picked number does not.
+- A script is `<purpose>.user.js`; the suffix is what makes the extension offer to install a raw link. Every header carries `@namespace github.com/volkanncicek/userscripts` plus `@updateURL` and `@downloadURL` pointing at its own raw URL on `main`. The namespace and name together are the script's identity in Tampermonkey, so changing either installs a new script beside the old one.
+- A change ships by committing it here, pushing, and then updating the script in Tampermonkey (click its "Last updated" time). Any edit to the installed copy, including one written through the `tampermonkey` MCP server, marks it "modified locally", and Tampermonkey stops updating it until a manual update overwrites the edit. So use the MCP server to try a change, then write it back here and update the installed copy from the repo.
+- A third-party script stays installed from its own source and is only listed in `third-party.md`. Once it is modified it becomes ours: copy it here, give it our name and namespace, and drop its upstream `@updateURL`, which would otherwise overwrite the change.
+- The repo is public. Work scripts, internal hostnames and anything that identifies an employer's systems belong in the private work repo, not here.
+- The repo is MIT licensed, so code copied from another project needs a licence that allows redistribution under MIT. GPL code does not; reimplement the idea from its public description instead of porting the code.
+- Update the table in `README.md` when a script is added or removed.
+- `npm run check` must pass before a commit; `npm run format` fixes formatting. `tools/check-scripts.mjs` is the authority on header layout and the code rules it can see in a single file, and `tools/check-versions.mjs` compares changed scripts against a git base so a missed version bump or a renamed identity or storage key fails before it ships. `npm install` wires both into a pre-commit hook through `core.hooksPath`, and CI runs them on every push.
+
+## Code standard
+
+- One IIFE per script, `(() => { "use strict"; … })();`, laid out top to bottom as constants, helpers, then the entry point that starts everything.
+- Constants are `UPPER_SNAKE_CASE`: tunables in a `CONFIG` object and page selectors in a `SELECTORS` object once there are more than two of either, with `camelCase` keys. Module state (`let`) sits with the constants, and DOM work starts in the entry point. Everything else is `camelCase`, named for what it holds, in English.
+- All console output goes through one `log` helper prefixed with the script's `@name` in brackets: either a function, or a `{ info, warn, error }` object when levels are needed. No startup "loaded" lines, no debug flags and no commented-out code.
+- Text the page itself shows or that the code matches against the page stays exactly as the site writes it, Turkish included. Text the script sends on the user's behalf, such as a prompt, is in the language the user writes it in. Everything the script shows the user is English.
+- On a single-page site, match the whole site and decide in code whether to act, re-checking on the site's navigation event. Tampermonkey injects only on a full page load, so a script matching one path never runs when the user navigates there inside the app. `youtube-subscription-tracker` is the reference.
+- To save files under chosen names, fetch them with `GM_xmlhttpRequest` and save one blob through a link carrying a `download` attribute, zipping several files into one; `sahibinden-photo-downloader` is the reference. `GM_download` goes through `chrome.downloads`, which drops the name whenever another extension (a download manager) listens for filename decisions, and Chrome silently holds back repeated downloads from a page until the site is allowed to download multiple files.
+- Never rename a `GM_setValue` or `localStorage` key: the data already saved under it would be orphaned without any error.
+- A credential or a value that locates a person, such as home coordinates, lives in Tampermonkey storage and is read with `GM_getValue`; the repo is public, so the file names the key and never holds the value.
+- A script that matches every site (`*://*/*`) does nothing until it is turned on for a host from the Tampermonkey menu, keeping those hosts in an `enabledHosts` array, and carries `@noframes` so it neither runs nor adds a menu entry in every iframe; `enhanced-scroll-controls` is the reference.
+- A change is finished once it has been tried on the live site in the browser. Lint passing says nothing about a selector the site renamed.

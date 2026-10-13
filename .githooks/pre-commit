@@ -1,0 +1,2 @@
+#!/bin/sh
+npm run --silent scripts && npx eslint . && npx prettier --check "*.user.js" "tools/*.mjs" eslint.config.mjs && node tools/check-versions.mjs --staged
