@@ -2,11 +2,13 @@
 
 Installed from their own source and updated from there; listed so a new browser profile can get them back.
 
+The two Instagram deleters start deleting as soon as their activity page loads, so keep them disabled in Tampermonkey except while using them.
+
 | Script | Install from |
 |---|---|
 | AdGuard Extra | https://userscripts.adtidy.org/release/adguard-extra/1.0/adguard-extra.user.js |
 | Bypass All Shortlinks Debloated | https://codeberg.org/gongchandang49/bypass-all-shortlinks-debloated/raw/branch/main/Bypass_All_Shortlinks.user.js |
-| ChatGPT Auto Refresh | https://codeberg.org/adamlui/ai-web-extensions/raw/branch/main/chatgpt-auto-refresh/greasemonkey/chatgpt-auto-refresh.user.js |
+| ChatGPT Auto Refresh ↻ | https://codeberg.org/adamlui/ai-web-extensions/raw/branch/main/chatgpt-auto-refresh/greasemonkey/chatgpt-auto-refresh.user.js |
 | Direct Link | https://greasyfork.org/scripts/463408 |
 | Download Original Picture | https://greasyfork.org/scripts/396746 |
 | Geocaching Map Enhancements | https://raw.githubusercontent.com/2Abendsegler/GME/main/Geocaching_Map_Enhancements.user.js |
