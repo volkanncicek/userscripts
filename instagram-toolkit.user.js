@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.19.7
+// @version      2026.10.19.8
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
@@ -61,7 +61,8 @@
   // Instagram's own wording when it limits activity, plus a lost session; any of these stops a run at once.
   const RESTRICTION_TEXT =
     /try again later|we restrict certain activity|we limit how often|something went wrong|log in/i;
-  // `action` is the bottom-bar button and its confirmation button; `done` is the toast Instagram shows once the items are gone. Likes were measured live; the other types assume Instagram's "Delete" wording, and a missing button or toast stops the run rather than guessing.
+  const EMPTY_TAB_TEXT = /^No .+ activity$/;
+  // `action` is the bottom-bar button and its confirmation button; `done` is the toast Instagram shows once the items are gone. Likes, comments and story replies were measured live and reposts showed the same Delete button; reviews held nothing to measure, and a missing button or toast stops the run rather than guessing.
   const TYPES = [
     { key: "comments", path: "comments", label: "Comments", action: "Delete", done: /^You deleted (\d+)/ },
     { key: "likes", path: "likes", label: "Likes", action: "Unlike", done: /^You unliked (\d+)/ },
@@ -178,7 +179,13 @@
       await sleep(CONFIG.listSettleMs);
     }
     activePath = path;
-    return waitFor(() => buttonWithText(document, LABELS.sortFilter));
+    // A tab that has never held anything (measured on Reviews: "No review activity") shows no toolbar at all, so it is reported as empty instead of waiting for a Sort & Filter button that will not come.
+    const found = await waitFor(
+      () =>
+        buttonWithText(document, LABELS.sortFilter) ||
+        textsMatching(EMPTY_TAB_TEXT).find((el) => listArea()?.contains(el)),
+    );
+    return found.matches(SELECTORS.button) ? found : null;
   }
 
   const textElement = (text, root = document) =>
@@ -186,7 +193,9 @@
 
   // The dialog holds two Month/Day/Year triples, start then end. Reset restores the widest range (the account's creation date to today) without applying it, so starting from it every date that is set is valid and the creation date can be read; it is only offered once a filter differs from that default, which is the state a fresh page starts in.
   async function openResetFilterDialog(type) {
-    (await openType(type)).click();
+    const toolbar = await openType(type);
+    if (!toolbar) return null;
+    toolbar.click();
     const dialog = await waitFor(() =>
       [...document.querySelectorAll(SELECTORS.dialog)].find((el) => el.querySelectorAll("select").length === 6),
     );
@@ -205,6 +214,7 @@
 
   async function accountStartDate(type) {
     const dialog = await openResetFilterDialog(type);
+    if (!dialog) return null;
     const [start] = datesIn(dialog);
     closeDialog(dialog);
     await waitFor(() => !document.contains(dialog));
@@ -231,8 +241,10 @@
     await setSelect(selects()[offset + 1], date.getDate());
   }
 
+  // Returns false when the tab has nothing at all, which callers treat like an empty year.
   async function applyRange(type, start, end) {
     const dialog = await openResetFilterDialog(type);
+    if (!dialog) return false;
     const selects = () => [...dialog.querySelectorAll("select")];
     buttonWithText(dialog, LABELS.oldestFirst).click();
     await sleep(CONFIG.uiStepMs);
@@ -272,6 +284,7 @@
       CONFIG.loadTimeoutMs,
     );
     await sleep(CONFIG.uiStepMs);
+    return true;
   }
   const listRow = () => listArea()?.querySelector("img");
   const listArea = () => document.querySelector(SELECTORS.main);
@@ -316,8 +329,7 @@
   }
 
   async function countRange(type, range) {
-    await applyRange(type, range.start, range.end);
-    if (listIsEmpty()) return 0;
+    if (!(await applyRange(type, range.start, range.end)) || listIsEmpty()) return 0;
     await enterSelectMode();
     const count = await loadAllRows();
     await exitSelectMode();
@@ -325,7 +337,7 @@
   }
 
   async function countAll(types, cutoff, showStatus) {
-    const ranges = yearRanges(await checkedAccountStart(types[0], cutoff), cutoff);
+    const ranges = await checkedRanges(types, cutoff);
     const lines = [];
     for (const type of types) {
       const perYear = [];
@@ -340,12 +352,17 @@
     showStatus(`On or before ${cutoff.toLocaleDateString()}:\n${lines.join("\n")}`);
   }
 
-  async function checkedAccountStart(type, cutoff) {
-    const accountStart = await accountStartDate(type);
-    if (cutoff < accountStart) {
-      throw new Error(`The date is before your account existed (${accountStart.toLocaleDateString()}).`);
+  // The creation date is read from the first selected tab that has a filter at all; if none has, there is nothing to clean.
+  async function checkedRanges(types, cutoff) {
+    for (const type of types) {
+      const accountStart = await accountStartDate(type);
+      if (!accountStart) continue;
+      if (cutoff < accountStart) {
+        throw new Error(`The date is before your account existed (${accountStart.toLocaleDateString()}).`);
+      }
+      return yearRanges(accountStart, cutoff);
     }
-    return accountStart;
+    return [];
   }
 
   const localDay = () => new Date().toLocaleDateString("sv");
@@ -431,8 +448,7 @@
     let batches = 0;
     for (const range of ranges) {
       while (batchBudget(progress) > 0) {
-        await applyRange(type, range.start, range.end);
-        if (listIsEmpty()) break;
+        if (!(await applyRange(type, range.start, range.end)) || listIsEmpty()) break;
         await deleteBatch(type, batchBudget(progress), progress);
         showStatus(`${type.label} from ${range.year}: ${progress.byType[type.key]} removed so far…`);
         batches += 1;
@@ -447,7 +463,7 @@
   }
 
   async function runAll(types, cutoff, progress, showStatus) {
-    const ranges = yearRanges(await checkedAccountStart(types[0], cutoff), cutoff);
+    const ranges = await checkedRanges(types, cutoff);
     for (const type of types) {
       if (batchBudget(progress) === 0) break;
       progress.current = type;
