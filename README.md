@@ -12,6 +12,7 @@ Personal userscripts for [Tampermonkey](https://www.tampermonkey.net/). Open a f
 | [google-map-preview-to-maps](https://raw.githubusercontent.com/volkanncicek/userscripts/main/google-map-preview-to-maps.user.js) | Opens Google Maps when you click the map preview in search results |
 | [gtu-announcement-dates](https://raw.githubusercontent.com/volkanncicek/userscripts/main/gtu-announcement-dates.user.js) | Adds last-updated dates to GTU announcement lists |
 | [instagram-gallery-photo-counter](https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-gallery-photo-counter.user.js) | Shows "3 of 5" in Instagram galleries |
+| [instagram-toolkit](https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js) | Removes your Instagram comments, likes, reposts, story replies and reviews from before a date you pick |
 | [linkedin-saved-posts-read-button](https://raw.githubusercontent.com/volkanncicek/userscripts/main/linkedin-saved-posts-read-button.user.js) | Read button on LinkedIn saved posts that opens the post in a new tab and greys out the row |
 | [mf286r-rf-panel](https://raw.githubusercontent.com/volkanncicek/userscripts/main/mf286r-rf-panel.user.js) | Live RF dashboard, DNS setting and 4G lock for the ZTE MF286R modem's web UI |
 | [nadirkitap-seller-info](https://raw.githubusercontent.com/volkanncicek/userscripts/main/nadirkitap-seller-info.user.js) | Shows the seller's city and a Google search link on Nadirkitap |
