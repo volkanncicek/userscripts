@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.19.4
+// @version      2026.10.19.5
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
@@ -387,12 +387,20 @@
 
   async function runAll(types, cutoff, progress, showStatus) {
     const ranges = yearRanges(await checkedAccountStart(types[0], cutoff), cutoff);
-    const budget = Math.min(CONFIG.runCap, remainingDailyAllowance());
+    const dailyLeft = remainingDailyAllowance();
+    const budget = Math.min(CONFIG.runCap, dailyLeft);
     for (const type of types) {
       if (progress.total >= budget) break;
       progress.current = type;
       await runType(type, ranges, budget, progress, showStatus);
     }
+    // Only a run that ended below its budget has emptied every selected year; one that hit a cap says which, since more may remain.
+    if (progress.total < budget) {
+      return `Nothing left on or before ${cutoff.toLocaleDateString()} in the selected types.`;
+    }
+    return dailyLeft <= CONFIG.runCap
+      ? "Daily cap reached: continue tomorrow."
+      : "Run cap reached: start again to continue.";
   }
 
   // A dialog or banner is either one of the three this flow expects (the filter, the confirmation, the done toast) or a reason to stop: anything Instagram shows that the script cannot place may be a warning in disguise.
@@ -500,8 +508,8 @@
     control("start").addEventListener(
       "click",
       runFromPanel(async (progress) => {
-        await runAll(readTypes(), readCutoff(), progress, showStatus);
-        showStatus(removedSummary(progress) || "Nothing to remove before the cutoff.");
+        const ending = await runAll(readTypes(), readCutoff(), progress, showStatus);
+        showStatus(`${removedSummary(progress)}${ending}`);
       }),
     );
     control("stop").addEventListener("click", () => requestStop("Stopped by you."));
