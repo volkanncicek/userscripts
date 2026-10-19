@@ -2,8 +2,6 @@
 
 Installed from their own source and updated from there; listed so a new browser profile can get them back.
 
-The two Instagram deleters start deleting as soon as their activity page loads, so keep them disabled in Tampermonkey except while using them.
-
 | Script | Install from |
 |---|---|
 | AdGuard Extra | https://userscripts.adtidy.org/release/adguard-extra/1.0/adguard-extra.user.js |
@@ -14,9 +12,7 @@ The two Instagram deleters start deleting as soon as their activity page loads, 
 | Geocaching Map Enhancements | https://raw.githubusercontent.com/2Abendsegler/GME/main/Geocaching_Map_Enhancements.user.js |
 | Greasy Fork Enhance | https://greasyfork.org/scripts/467078 |
 | Instagram: Arrow Keys for Multi-Image Posts | https://greasyfork.org/scripts/485032 |
-| Instagram comment deleter | https://greasyfork.org/scripts/483897 |
 | Instagram Download Button | https://greasyfork.org/scripts/406535 |
-| Instagram like deleter | https://greasyfork.org/scripts/484136 |
 | Instagram non-English link redirector | https://greasyfork.org/scripts/487219 |
 | LinkedIn Job Skills Highlighter | https://greasyfork.org/scripts/527243 |
 | LinkedIn Reposted & Apply Highlighter | https://greasyfork.org/scripts/554639 |
