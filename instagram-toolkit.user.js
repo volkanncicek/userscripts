@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.19.9
+// @version      2026.10.19.10
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
@@ -25,7 +25,8 @@
     listSettleMs: 3000,
     scrollPauseMs: 2000,
     loadTimeoutMs: 600000,
-    loadStallMs: 30000,
+    loadStallMs: 90000,
+    nudgeEveryChecks: 5,
     scrollStableChecks: 3,
     selectStepMs: 400,
     confirmTimeoutMs: 20000,
@@ -83,10 +84,10 @@
   // Opening the panel from another page needs a full navigation, which drops the panel; this flag survives it so the panel reopens on arrival.
   const REOPEN_FLAG = "igtk-reopen-panel";
   const PANEL_CSS = `
-    #igtk-panel { position: fixed; top: 16px; right: 16px; z-index: 2147483000; width: 320px; padding: 14px; border-radius: 10px; background: #1c1c1e; color: #f5f5f5; font: 13px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5); }
+    #igtk-panel { position: fixed; top: 16px; right: 16px; z-index: 2147483000; width: 320px; padding: 14px; border-radius: 10px; background: #1c1c1e; color: #f5f5f5; font: 13px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5); color-scheme: dark; }
     #igtk-panel h2 { margin: 0 0 10px; font-size: 15px; }
     #igtk-panel label { display: block; margin: 4px 0; }
-    #igtk-panel input[type="date"] { margin-left: 6px; }
+    #igtk-panel input[type="date"] { margin-left: 6px; padding: 2px 6px; border: 1px solid #555; border-radius: 6px; background: #2c2c2e; color: #f5f5f5; font: inherit; }
     #igtk-panel .igtk-buttons { display: flex; gap: 6px; margin: 10px 0; }
     #igtk-panel button { flex: 1; padding: 6px; border: 0; border-radius: 6px; background: #0095f6; color: #fff; cursor: pointer; }
     #igtk-panel button:disabled { background: #555; cursor: default; }
@@ -314,15 +315,22 @@
     return null;
   }
 
-  // The list lazy-loads slowly while a progress bar shows; stopping when the count merely paused undercounted a year several times over, so it is done only once the bar is gone and the count has held. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace. Measured after a day of heavy use: the bar can keep spinning with no new rows and no error, so a count that stops growing while the bar is still there is a stall to stop on, not a wait to sit out.
+  // The list lazy-loads slowly while a progress bar shows; stopping when the count merely paused undercounted a year several times over, so it is done only once the bar is gone and the count has held. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace. Measured: the bar can keep spinning with no new rows for half a minute and then carry on, and once for minutes with no error at all, which a person's scrolling gets past by moving the list. So a list that stops growing is nudged up and back down every few checks, and only one that stays stuck past the stall limit stops the count.
   async function loadAllRows() {
     const deadline = Date.now() + CONFIG.loadTimeoutMs;
     let seen = -1;
     let quiet = 0;
     let stalledSince = Date.now();
+    let checks = 0;
     while (quiet < CONFIG.scrollStableChecks) {
       if (Date.now() > deadline) throw new Error("The list did not finish loading, so nothing was counted.");
-      scrollableAncestor(rowToggles().at(-1))?.scrollTo(0, Number.MAX_SAFE_INTEGER);
+      const scroller = scrollableAncestor(rowToggles().at(-1));
+      checks += 1;
+      if (scroller && Date.now() - stalledSince > CONFIG.scrollPauseMs && checks % CONFIG.nudgeEveryChecks === 0) {
+        scroller.scrollTop = Math.max(0, scroller.scrollTop - scroller.clientHeight);
+        await pause(CONFIG.uiStepMs);
+      }
+      scroller?.scrollTo(0, scroller.scrollHeight);
       await pause(CONFIG.scrollPauseMs);
       const now = rowToggles().length;
       const loading = Boolean(document.querySelector(SELECTORS.loading));
