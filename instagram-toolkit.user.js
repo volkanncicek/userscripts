@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.19.3
+// @version      2026.10.19.4
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
@@ -10,6 +10,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        unsafeWindow
 // @run-at       document-idle
 // @noframes     true
 // ==/UserScript==
@@ -33,6 +34,7 @@
     longPauseEveryBatches: 10,
     longPauseMinMs: 180000,
     longPauseMaxMs: 300000,
+    watchIntervalMs: 500,
     runCap: 300,
     dailyCap: 1000,
   };
@@ -43,6 +45,7 @@
     tab: 'a[role="tab"]',
     rowToggle: '[aria-label="Toggle checkbox"]',
     loading: '[role="progressbar"]',
+    notice: '[role="dialog"], [role="alert"]',
   };
   const LABELS = {
     sortFilter: "Sort & Filter",
@@ -53,6 +56,9 @@
     cancel: "Cancel",
     reset: "Reset",
   };
+  // Instagram's own wording when it limits activity, plus a lost session; any of these stops a run at once.
+  const RESTRICTION_TEXT =
+    /try again later|we restrict certain activity|we limit how often|something went wrong|log in/i;
   // `action` is the bottom-bar button and its confirmation button; `done` is the toast Instagram shows once the items are gone. Likes were measured live; the other types assume Instagram's "Delete" wording, and a missing button or toast stops the run rather than guessing.
   const TYPES = [
     { key: "comments", path: "comments", label: "Comments", action: "Delete", done: /^You deleted (\d+)/ },
@@ -89,15 +95,37 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  let stopReason = null;
+  const requestStop = (reason) => {
+    stopReason ??= reason;
+  };
+
+  // Every wait goes through here, so a stop, a restriction or leaving the page takes effect before the next click rather than after the batch.
+  function checkStop() {
+    if (!location.pathname.startsWith(ACTIVITY_PATH)) requestStop("You left the activity page.");
+    if (stopReason) throw new Error(stopReason);
+  }
+
   async function waitFor(probe, timeoutMs = CONFIG.uiTimeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      checkStop();
       const found = probe();
       if (found) return found;
       await sleep(150);
     }
     throw new Error(`Timed out waiting for the page (${probe.name || "condition"})`);
   }
+
+  async function pause(ms) {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      checkStop();
+      await sleep(Math.min(500, until - Date.now()));
+    }
+  }
+
+  const jittered = (ms) => ms * (1 + (Math.random() * 2 - 1) * CONFIG.pauseJitter);
 
   const buttonWithText = (root, text) =>
     [...root.querySelectorAll(SELECTORS.button)].find((el) => el.innerText.trim() === text);
@@ -294,10 +322,6 @@
     GM_setValue(DAILY_KEY, { date: state.date, count: state.count + count });
   }
 
-  function pause(ms) {
-    return sleep(ms * (1 + (Math.random() * 2 - 1) * CONFIG.pauseJitter));
-  }
-
   function textsMatching(regex) {
     return [...document.querySelectorAll("span, div")].filter(
       (el) => el.childElementCount === 0 && regex.test(el.innerText?.trim() ?? ""),
@@ -311,7 +335,7 @@
       const toggle = rowToggles()[index];
       if (!toggle) break;
       toggle.click();
-      await sleep(CONFIG.selectStepMs);
+      await pause(CONFIG.selectStepMs);
     }
     const selected = Number(textsMatching(/^\d+ selected$/)[0]?.innerText.match(/\d+/)[0] ?? 0);
     if (selected === 0) {
@@ -336,49 +360,84 @@
   }
 
   // The year's range is re-applied before every batch: Instagram reloads the list after each deletion, and a filter lost in that reload would put newer items at the top of the list.
-  async function runType(type, ranges, budget, showStatus) {
-    let deleted = 0;
+  async function runType(type, ranges, budget, progress, showStatus) {
     let batches = 0;
     for (const range of ranges) {
-      while (deleted < budget) {
+      while (progress.total < budget) {
         await applyRange(type, range.start, range.end);
         if (listIsEmpty()) break;
-        const size = Math.min(CONFIG.batchSize, budget - deleted);
+        const size = Math.min(CONFIG.batchSize, budget - progress.total);
         const { selected, removed } = await deleteBatch(type, size);
         recordDeleted(removed);
-        deleted += removed;
-        showStatus(`${type.label} from ${range.year}: ${deleted} removed so far…`);
-        if (removed < selected) return { deleted, stoppedBy: `Instagram removed ${removed} of ${selected} selected` };
+        progress.total += removed;
+        progress.byType[type.key] = (progress.byType[type.key] ?? 0) + removed;
+        showStatus(`${type.label} from ${range.year}: ${progress.byType[type.key]} removed so far…`);
+        if (removed < selected) requestStop(`Instagram removed only ${removed} of ${selected} selected items.`);
         batches += 1;
-        if (deleted >= budget) break;
-        if (batches % CONFIG.longPauseEveryBatches === 0) {
-          await sleep(CONFIG.longPauseMinMs + Math.random() * (CONFIG.longPauseMaxMs - CONFIG.longPauseMinMs));
-        } else {
-          await pause(CONFIG.batchPauseMs);
-        }
+        if (progress.total >= budget) break;
+        await pause(
+          batches % CONFIG.longPauseEveryBatches === 0
+            ? CONFIG.longPauseMinMs + Math.random() * (CONFIG.longPauseMaxMs - CONFIG.longPauseMinMs)
+            : jittered(CONFIG.batchPauseMs),
+        );
         if (selected < size) break;
       }
     }
-    return { deleted, stoppedBy: null };
   }
 
-  async function runAll(types, cutoff, showStatus) {
+  async function runAll(types, cutoff, progress, showStatus) {
     const ranges = yearRanges(await checkedAccountStart(types[0], cutoff), cutoff);
-    let budget = Math.min(CONFIG.runCap, remainingDailyAllowance());
-    const results = {};
+    const budget = Math.min(CONFIG.runCap, remainingDailyAllowance());
     for (const type of types) {
-      if (budget === 0) break;
-      results[type.key] = await runType(type, ranges, budget, showStatus);
-      budget -= results[type.key].deleted;
-      if (results[type.key].stoppedBy) break;
+      if (progress.total >= budget) break;
+      progress.current = type;
+      await runType(type, ranges, budget, progress, showStatus);
     }
-    showStatus(
-      types
-        .filter((type) => results[type.key])
-        .map((type) => `${type.label}: ${results[type.key].deleted} removed`)
-        .join("\n"),
-    );
-    return results;
+  }
+
+  // A dialog or banner is either one of the three this flow expects (the filter, the confirmation, the done toast) or a reason to stop: anything Instagram shows that the script cannot place may be a warning in disguise.
+  function judgeNotice(element, type) {
+    const text = element.innerText.trim();
+    if (RESTRICTION_TEXT.test(text)) {
+      return `Instagram said: “${text.slice(0, 120)}”. Wait at least 24 hours before running again.`;
+    }
+    if (text.includes(LABELS.sortFilter) || type?.done.test(text)) return null;
+    if (type && buttonWithText(element, type.action) && buttonWithText(element, LABELS.cancel)) return null;
+    return `Instagram showed something unexpected: “${text.slice(0, 120)}”.`;
+  }
+
+  // Watches for the first sign of a restriction while a run is active: notices in the page, and any HTTP 429 from Instagram's own requests, which only unsafeWindow can see.
+  function watchRestrictions(progress) {
+    const judged = new WeakSet();
+    const timer = setInterval(() => {
+      for (const element of document.querySelectorAll(SELECTORS.notice)) {
+        if (judged.has(element) || element.closest(SELECTORS.panel) || !element.innerText?.trim()) continue;
+        judged.add(element);
+        const reason = judgeNotice(element, progress.current);
+        if (reason) requestStop(reason);
+      }
+    }, CONFIG.watchIntervalMs);
+    const page = unsafeWindow;
+    const tooManyRequests = "Instagram answered 429 Too Many Requests. Wait at least 24 hours before running again.";
+    const originalFetch = page.fetch;
+    page.fetch = function (...args) {
+      return originalFetch.apply(this, args).then((response) => {
+        if (response.status === 429) requestStop(tooManyRequests);
+        return response;
+      });
+    };
+    const originalSend = page.XMLHttpRequest.prototype.send;
+    page.XMLHttpRequest.prototype.send = function (...args) {
+      this.addEventListener("loadend", () => {
+        if (this.status === 429) requestStop(tooManyRequests);
+      });
+      return originalSend.apply(this, args);
+    };
+    return () => {
+      clearInterval(timer);
+      page.fetch = originalFetch;
+      page.XMLHttpRequest.prototype.send = originalSend;
+    };
   }
 
   function buildPanel() {
@@ -397,7 +456,10 @@
       </div>
       <div class="igtk-status" data-igtk="status"></div>
     `;
-    panel.querySelector('[data-igtk="close"]').addEventListener("click", () => panel.remove());
+    panel.querySelector('[data-igtk="close"]').addEventListener("click", () => {
+      requestStop("You closed the panel.");
+      panel.remove();
+    });
     const control = (name) => panel.querySelector(`[data-igtk="${name}"]`);
     const showStatus = (text) => (control("status").textContent = text);
     const readCutoff = () =>
@@ -407,30 +469,42 @@
           .map((part) => part.replace(/^0/, "")),
       );
     const readTypes = () => TYPES.filter((type) => panel.querySelector(`[data-igtk-type="${type.key}"]`).checked);
-    control("count").addEventListener("click", async () => {
+    const removedSummary = (progress) =>
+      readTypes()
+        .filter((type) => progress.byType[type.key])
+        .map((type) => `${type.label}: ${progress.byType[type.key]} removed\n`)
+        .join("");
+    const runFromPanel = (task) => async () => {
+      stopReason = null;
+      const progress = { total: 0, byType: {}, current: null };
       control("count").disabled = true;
       control("start").disabled = true;
+      control("stop").disabled = false;
+      const stopWatching = watchRestrictions(progress);
       try {
-        await countAll(readTypes(), readCutoff(), showStatus);
+        await task(progress);
       } catch (error) {
-        showStatus(`Stopped: ${error.message}`);
+        // A stop surfaces as whatever wait it interrupted, which may rewrap it, so the recorded reason wins over the error's own message.
+        showStatus(`${removedSummary(progress)}Stopped: ${stopReason ?? error.message}`);
       } finally {
+        stopWatching();
         control("count").disabled = false;
         control("start").disabled = false;
+        control("stop").disabled = true;
       }
-    });
-    control("start").addEventListener("click", async () => {
-      control("count").disabled = true;
-      control("start").disabled = true;
-      try {
-        await runAll(readTypes(), readCutoff(), showStatus);
-      } catch (error) {
-        showStatus(`Stopped: ${error.message}`);
-      } finally {
-        control("count").disabled = false;
-        control("start").disabled = false;
-      }
-    });
+    };
+    control("count").addEventListener(
+      "click",
+      runFromPanel(() => countAll(readTypes(), readCutoff(), showStatus)),
+    );
+    control("start").addEventListener(
+      "click",
+      runFromPanel(async (progress) => {
+        await runAll(readTypes(), readCutoff(), progress, showStatus);
+        showStatus(removedSummary(progress) || "Nothing to remove before the cutoff.");
+      }),
+    );
+    control("stop").addEventListener("click", () => requestStop("Stopped by you."));
     if (!isEnglishUi()) {
       panel.querySelector('[data-igtk="count"]').disabled = true;
       panel.querySelector('[data-igtk="start"]').disabled = true;
