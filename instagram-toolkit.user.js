@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.19.6
+// @version      2026.10.19.7
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
@@ -35,6 +35,7 @@
     longPauseMinMs: 180000,
     longPauseMaxMs: 300000,
     watchIntervalMs: 500,
+    maxAncestorSteps: 6,
     runCap: 300,
     dailyCap: 1000,
   };
@@ -160,9 +161,8 @@
 
   const toLocalDate = (year, month, day) => new Date(Number(year), Number(month) - 1, Number(day));
 
-  function validateCutoff(cutoff, earliest, today) {
+  function validateCutoff(cutoff, today) {
     if (!(cutoff instanceof Date) || Number.isNaN(cutoff.getTime())) return "Pick a valid date.";
-    if (cutoff < earliest) return `The date is before your account existed (${earliest.toLocaleDateString()}).`;
     if (cutoff > today) return "The date is in the future.";
     return null;
   }
@@ -211,17 +211,18 @@
     return start;
   }
 
-  // One calendar year at a time, oldest first: a single year keeps the list short enough to load completely, and a run cut short by a cap has always removed the oldest items.
+  // One calendar year at a time, oldest first: a single year keeps the list short enough to load completely, and a run cut short by a cap has always removed the oldest items. The filter stops a day short of the cutoff because it is unknown whether Instagram reads its end date in local time or UTC; a day's margin keeps every removed item on or before the cutoff in either reading, at the price of leaving the cutoff day itself for a later run.
   function yearRanges(accountStart, cutoff) {
+    const lastDay = new Date(cutoff.getFullYear(), cutoff.getMonth(), cutoff.getDate() - 1);
     const ranges = [];
-    for (let year = accountStart.getFullYear(); year <= cutoff.getFullYear(); year++) {
+    for (let year = accountStart.getFullYear(); year <= lastDay.getFullYear(); year++) {
       ranges.push({
         year,
         start: year === accountStart.getFullYear() ? accountStart : new Date(year, 0, 1),
-        end: year === cutoff.getFullYear() ? cutoff : new Date(year, 11, 31),
+        end: year === lastDay.getFullYear() ? lastDay : new Date(year, 11, 31),
       });
     }
-    return ranges;
+    return ranges.filter((range) => range.start <= range.end);
   }
 
   async function setDate(selects, offset, date) {
@@ -341,8 +342,9 @@
 
   async function checkedAccountStart(type, cutoff) {
     const accountStart = await accountStartDate(type);
-    const error = validateCutoff(cutoff, accountStart, new Date());
-    if (error) throw new Error(error);
+    if (cutoff < accountStart) {
+      throw new Error(`The date is before your account existed (${accountStart.toLocaleDateString()}).`);
+    }
     return accountStart;
   }
 
@@ -366,6 +368,18 @@
     );
   }
 
+  function selectionBarButton(counter, text) {
+    for (
+      let node = counter?.parentElement, step = 0;
+      node && step < CONFIG.maxAncestorSteps;
+      node = node.parentElement, step++
+    ) {
+      const button = textElement(text, node);
+      if (button) return button;
+    }
+    return null;
+  }
+
   function countRemoved(type, progress, count) {
     recordDeleted(count);
     progress.total += count;
@@ -381,10 +395,12 @@
       toggle.click();
       await pause(CONFIG.selectStepMs);
     }
-    const selected = Number(textsMatching(/^\d+ selected$/)[0]?.innerText.match(/\d+/)[0] ?? 0);
+    const counter = textsMatching(/^\d+ selected$/)[0];
+    const selected = Number(counter?.innerText.match(/\d+/)[0] ?? 0);
     if (selected === 0) throw new Error("Nothing could be selected although the list is not empty.");
     const earlierToasts = new Set(textsMatching(type.done));
-    (await waitFor(() => textElement(type.action))).click();
+    // The action button shares the selection bar with the "N selected" counter; searching only there keeps a comment that happens to read "Delete" from being clicked instead.
+    (await waitFor(() => selectionBarButton(counter, type.action))).click();
     const confirm = await waitFor(() =>
       [...document.querySelectorAll(SELECTORS.dialog)]
         .map((dialog) => buttonWithText(dialog, type.action))
@@ -406,17 +422,21 @@
     await waitFor(() => !textElement(LABELS.cancel));
   }
 
+  // The daily allowance is re-read before every batch rather than once per run, so two tabs running on the same day cannot each spend the whole of it.
+  const batchBudget = (progress) =>
+    Math.min(CONFIG.batchSize, CONFIG.runCap - progress.total, remainingDailyAllowance());
+
   // The year's range is re-applied before every batch: Instagram reloads the list after each deletion, and a filter lost in that reload would put newer items at the top of the list. A year counts as done only when its filtered list says it is empty.
-  async function runType(type, ranges, budget, progress, showStatus) {
+  async function runType(type, ranges, progress, showStatus) {
     let batches = 0;
     for (const range of ranges) {
-      while (progress.total < budget) {
+      while (batchBudget(progress) > 0) {
         await applyRange(type, range.start, range.end);
         if (listIsEmpty()) break;
-        await deleteBatch(type, Math.min(CONFIG.batchSize, budget - progress.total), progress);
+        await deleteBatch(type, batchBudget(progress), progress);
         showStatus(`${type.label} from ${range.year}: ${progress.byType[type.key]} removed so far…`);
         batches += 1;
-        if (progress.total >= budget) break;
+        if (batchBudget(progress) === 0) break;
         await pause(
           batches % CONFIG.longPauseEveryBatches === 0
             ? CONFIG.longPauseMinMs + Math.random() * (CONFIG.longPauseMaxMs - CONFIG.longPauseMinMs)
@@ -428,21 +448,16 @@
 
   async function runAll(types, cutoff, progress, showStatus) {
     const ranges = yearRanges(await checkedAccountStart(types[0], cutoff), cutoff);
-    const dailyLeft = remainingDailyAllowance();
-    const budget = Math.min(CONFIG.runCap, dailyLeft);
     for (const type of types) {
-      if (progress.total >= budget) break;
+      if (batchBudget(progress) === 0) break;
       progress.current = type;
-      await runType(type, ranges, budget, progress, showStatus);
+      await runType(type, ranges, progress, showStatus);
     }
     checkStop();
-    // Only a run that ended below its budget has emptied every selected year; one that hit a cap says which, since more may remain.
-    if (progress.total < budget) {
-      return `Nothing left on or before ${cutoff.toLocaleDateString()} in the selected types.`;
-    }
-    return dailyLeft <= CONFIG.runCap
-      ? "Daily cap reached: continue tomorrow."
-      : "Run cap reached: start again to continue.";
+    // Only a run that still had budget left has emptied every selected year; one that hit a cap says which, since more may remain.
+    if (remainingDailyAllowance() === 0) return "Daily cap reached: continue tomorrow.";
+    if (progress.total >= CONFIG.runCap) return "Run cap reached: start again to continue.";
+    return `Nothing left on or before ${cutoff.toLocaleDateString()} in the selected types.`;
   }
 
   // A dialog or banner is either one of the three this flow expects (the filter, the confirmation, the done toast) or a reason to stop: anything Instagram shows that the script cannot place may be a warning in disguise.
@@ -457,36 +472,43 @@
   }
 
   // Watches for the first sign of a restriction while a run is active: notices in the page, and any HTTP 429 from Instagram's own requests, which only unsafeWindow can see.
+  // A notice is judged again whenever its text changes, since Instagram can reuse one toast container for a done message and then a warning.
   function watchRestrictions(progress) {
-    const judged = new WeakSet();
+    const judgedText = new WeakMap();
     const timer = setInterval(() => {
       for (const element of document.querySelectorAll(SELECTORS.notice)) {
-        if (judged.has(element) || element.closest(SELECTORS.panel) || !element.innerText?.trim()) continue;
-        judged.add(element);
+        const text = element.innerText?.trim();
+        if (!text || judgedText.get(element) === text || element.closest(SELECTORS.panel)) continue;
+        judgedText.set(element, text);
         const reason = judgeNotice(element, progress.current);
         if (reason) requestStop(reason);
       }
     }, CONFIG.watchIntervalMs);
     const page = unsafeWindow;
     const tooManyRequests = "Instagram answered 429 Too Many Requests. Wait at least 24 hours before running again.";
+    let watching = true;
     const originalFetch = page.fetch;
-    page.fetch = function (...args) {
+    const watchedFetch = function (...args) {
       return originalFetch.apply(this, args).then((response) => {
-        if (response.status === 429) requestStop(tooManyRequests);
+        if (watching && response.status === 429) requestStop(tooManyRequests);
         return response;
       });
     };
+    page.fetch = watchedFetch;
     const originalSend = page.XMLHttpRequest.prototype.send;
-    page.XMLHttpRequest.prototype.send = function (...args) {
+    const watchedSend = function (...args) {
       this.addEventListener("loadend", () => {
-        if (this.status === 429) requestStop(tooManyRequests);
+        if (watching && this.status === 429) requestStop(tooManyRequests);
       });
       return originalSend.apply(this, args);
     };
+    page.XMLHttpRequest.prototype.send = watchedSend;
+    // Something else may have wrapped these after us; restoring over its wrapper would undo it, so ours is only unhooked when still on top and otherwise left in place as a pass-through.
     return () => {
+      watching = false;
       clearInterval(timer);
-      page.fetch = originalFetch;
-      page.XMLHttpRequest.prototype.send = originalSend;
+      if (page.fetch === watchedFetch) page.fetch = originalFetch;
+      if (page.XMLHttpRequest.prototype.send === watchedSend) page.XMLHttpRequest.prototype.send = originalSend;
     };
   }
 
@@ -512,22 +534,24 @@
     });
     const control = (name) => panel.querySelector(`[data-igtk="${name}"]`);
     const showStatus = (text) => (control("status").textContent = text);
-    const readCutoff = () =>
-      toLocalDate(
-        ...control("cutoff")
-          .value.split("-")
-          .map((part) => part.replace(/^0/, "")),
-      );
+    const readCutoff = () => toLocalDate(...control("cutoff").value.split("-"));
     const readTypes = () => TYPES.filter((type) => panel.querySelector(`[data-igtk-type="${type.key}"]`).checked);
+    const inputs = () => panel.querySelectorAll("input");
     const removedSummary = (progress) =>
-      readTypes()
-        .filter((type) => progress.byType[type.key])
+      TYPES.filter((type) => progress.byType[type.key])
         .map((type) => `${type.label}: ${progress.byType[type.key]} removed\n`)
         .join("");
-    // A run cut short by closing the panel may still be finishing a wait; a second run started from a reopened panel would clear its stop and both would click at once.
+    // A run cut short by closing the panel may still be finishing a wait; a second run started from a reopened panel would clear its stop and both would click at once. The inputs are frozen for the run because the run reads them only once, at its start.
     const runFromPanel = (task) => async () => {
       if (running) {
         showStatus("The previous run is still stopping; try again in a moment.");
+        return;
+      }
+      const cutoff = readCutoff();
+      const types = readTypes();
+      const invalid = types.length === 0 ? "Tick at least one type." : validateCutoff(cutoff, new Date());
+      if (invalid) {
+        showStatus(invalid);
         return;
       }
       running = true;
@@ -536,9 +560,10 @@
       control("count").disabled = true;
       control("start").disabled = true;
       control("stop").disabled = false;
+      inputs().forEach((input) => (input.disabled = true));
       const stopWatching = watchRestrictions(progress);
       try {
-        await task(progress);
+        await task(types, cutoff, progress);
       } catch (error) {
         // A stop surfaces as whatever wait it interrupted, which may rewrap it, so the recorded reason wins over the error's own message.
         showStatus(`${removedSummary(progress)}Stopped: ${stopReason ?? error.message}`);
@@ -549,18 +574,22 @@
         control("count").disabled = false;
         control("start").disabled = false;
         control("stop").disabled = true;
+        inputs().forEach((input) => (input.disabled = false));
       }
     };
     control("count").addEventListener(
       "click",
-      runFromPanel(() => countAll(readTypes(), readCutoff(), showStatus)),
+      runFromPanel((types, cutoff) => countAll(types, cutoff, showStatus)),
     );
     control("start").addEventListener(
       "click",
-      runFromPanel(async (progress) => {
-        const ending = await runAll(readTypes(), readCutoff(), progress, showStatus);
+      runFromPanel(async (types, cutoff, progress) => {
+        const ending = await runAll(types, cutoff, progress, showStatus);
         showStatus(`${removedSummary(progress)}${ending}`);
       }),
+    );
+    showStatus(
+      `Today's allowance: ${remainingDailyAllowance()} of ${CONFIG.dailyCap}. The chosen day itself is kept as a time-zone margin.`,
     );
     control("stop").addEventListener("click", () => requestStop("Stopped by you."));
     if (!isEnglishUi()) {
