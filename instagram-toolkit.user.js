@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.19.8
+// @version      2026.10.19.9
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
@@ -25,6 +25,7 @@
     listSettleMs: 3000,
     scrollPauseMs: 2000,
     loadTimeoutMs: 600000,
+    loadStallMs: 30000,
     scrollStableChecks: 3,
     selectStepMs: 400,
     confirmTimeoutMs: 20000,
@@ -275,7 +276,9 @@
         () => (firstRowBefore ? listRow() !== firstRowBefore : document.querySelector(SELECTORS.loading) || listRow()),
         CONFIG.uiTimeoutMs,
       ).catch(() => {
-        throw new Error("Could not confirm that Instagram applied the filter, so nothing was selected.");
+        throw new Error(
+          "Instagram did not refresh the list after the filter was applied, so nothing was selected. It may be slowing down activity; try again later.",
+        );
       });
     }
     // An empty list shows no load-more spinner, so "No results" counts only once loading has stopped; a non-empty list is ready as soon as its first row is there.
@@ -311,17 +314,24 @@
     return null;
   }
 
-  // The list lazy-loads slowly while a progress bar shows; stopping when the count merely paused undercounted a year several times over, so it is done only once the bar is gone and the count has held. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace.
+  // The list lazy-loads slowly while a progress bar shows; stopping when the count merely paused undercounted a year several times over, so it is done only once the bar is gone and the count has held. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace. Measured after a day of heavy use: the bar can keep spinning with no new rows and no error, so a count that stops growing while the bar is still there is a stall to stop on, not a wait to sit out.
   async function loadAllRows() {
     const deadline = Date.now() + CONFIG.loadTimeoutMs;
     let seen = -1;
     let quiet = 0;
+    let stalledSince = Date.now();
     while (quiet < CONFIG.scrollStableChecks) {
       if (Date.now() > deadline) throw new Error("The list did not finish loading, so nothing was counted.");
       scrollableAncestor(rowToggles().at(-1))?.scrollTo(0, Number.MAX_SAFE_INTEGER);
-      await sleep(CONFIG.scrollPauseMs);
+      await pause(CONFIG.scrollPauseMs);
       const now = rowToggles().length;
       const loading = Boolean(document.querySelector(SELECTORS.loading));
+      if (now !== seen) stalledSince = Date.now();
+      if (loading && Date.now() - stalledSince > CONFIG.loadStallMs) {
+        throw new Error(
+          "Instagram stopped loading more items, so nothing was counted. It may be slowing down activity; try again later.",
+        );
+      }
       quiet = !loading && now === seen ? quiet + 1 : 0;
       seen = now;
     }
