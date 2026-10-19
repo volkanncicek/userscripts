@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.19.5
+// @version      2026.10.19.6
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
@@ -46,6 +46,7 @@
     rowToggle: '[aria-label="Toggle checkbox"]',
     loading: '[role="progressbar"]',
     notice: '[role="dialog"], [role="alert"]',
+    main: 'main, [role="main"]',
   };
   const LABELS = {
     sortFilter: "Sort & Filter",
@@ -96,14 +97,29 @@
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   let stopReason = null;
+  let running = false;
+  // The tab a run is working on; another activity tab has another filter, so landing there is as much a reason to stop as leaving.
+  let activePath = null;
   const requestStop = (reason) => {
     stopReason ??= reason;
   };
+  const currentPath = () => location.pathname.replace(/\/$/, "");
 
   // Every wait goes through here, so a stop, a restriction or leaving the page takes effect before the next click rather than after the batch.
   function checkStop() {
     if (!location.pathname.startsWith(ACTIVITY_PATH)) requestStop("You left the activity page.");
+    else if (activePath && currentPath() !== activePath) requestStop("The page switched to another tab.");
     if (stopReason) throw new Error(stopReason);
+  }
+
+  async function waitEvenIfStopped(probe, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const found = probe();
+      if (found) return found;
+      await sleep(150);
+    }
+    return null;
   }
 
   async function waitFor(probe, timeoutMs = CONFIG.uiTimeoutMs) {
@@ -153,29 +169,32 @@
 
   async function openType(type) {
     const path = `${ACTIVITY_PATH}${type.path}`;
-    if (location.pathname.replace(/\/$/, "") !== path) {
+    if (currentPath() !== path) {
+      activePath = null;
       const tab = await waitFor(() => document.querySelector(`${SELECTORS.tab}[href="${path}"]`));
       tab.click();
       // The previous tab's toolbar lingers for a moment after the URL changes, so wait for the new tab to be selected and its list to settle before using the toolbar.
-      await waitFor(
-        () => location.pathname.replace(/\/$/, "") === path && tab.getAttribute("aria-selected") === "true",
-      );
+      await waitFor(() => currentPath() === path && tab.getAttribute("aria-selected") === "true");
       await sleep(CONFIG.listSettleMs);
     }
+    activePath = path;
     return waitFor(() => buttonWithText(document, LABELS.sortFilter));
   }
 
   const textElement = (text, root = document) =>
     [...root.querySelectorAll("span, div")].find((el) => el.childElementCount === 0 && el.innerText?.trim() === text);
 
-  // The dialog holds two Month/Day/Year triples, start then end. Reset restores the widest range (the account's creation date to today) without applying it, so starting from it every date that is set is valid and the creation date can be read.
+  // The dialog holds two Month/Day/Year triples, start then end. Reset restores the widest range (the account's creation date to today) without applying it, so starting from it every date that is set is valid and the creation date can be read; it is only offered once a filter differs from that default, which is the state a fresh page starts in.
   async function openResetFilterDialog(type) {
     (await openType(type)).click();
     const dialog = await waitFor(() =>
       [...document.querySelectorAll(SELECTORS.dialog)].find((el) => el.querySelectorAll("select").length === 6),
     );
-    (await waitFor(() => textElement(LABELS.reset, dialog))).click();
-    await sleep(CONFIG.uiStepMs);
+    const reset = textElement(LABELS.reset, dialog);
+    if (reset) {
+      reset.click();
+      await sleep(CONFIG.uiStepMs);
+    }
     return dialog;
   }
 
@@ -232,13 +251,31 @@
     });
     // Apply stays disabled when the filter already matches, in which case the list is already the one wanted and only the dialog needs closing.
     const apply = buttonWithText(dialog, LABELS.apply);
-    if (apply.getAttribute("aria-disabled") === "true") closeDialog(dialog);
-    else apply.click();
-    await waitFor(() => !document.contains(dialog));
-    await sleep(CONFIG.listSettleMs);
+    if (apply.getAttribute("aria-disabled") === "true") {
+      closeDialog(dialog);
+      await waitFor(() => !document.contains(dialog));
+    } else {
+      // Measured: Apply empties the list within about 100 ms and the filtered list arrives 1-3 s later. The old list's first row going away is the proof it was replaced, so no row of it can be selected; a long list keeps a load-more spinner at its foot, so a spinner proves nothing unless the old list was empty. A list that never visibly turns over stops the run.
+      const firstRowBefore = listRow();
+      apply.click();
+      await waitFor(
+        () => (firstRowBefore ? listRow() !== firstRowBefore : document.querySelector(SELECTORS.loading) || listRow()),
+        CONFIG.uiTimeoutMs,
+      ).catch(() => {
+        throw new Error("Could not confirm that Instagram applied the filter, so nothing was selected.");
+      });
+    }
+    // An empty list shows no load-more spinner, so "No results" counts only once loading has stopped; a non-empty list is ready as soon as its first row is there.
+    await waitFor(
+      () => listRow() || (listIsEmpty() && !document.querySelector(SELECTORS.loading)),
+      CONFIG.loadTimeoutMs,
+    );
+    await sleep(CONFIG.uiStepMs);
   }
+  const listRow = () => listArea()?.querySelector("img");
+  const listArea = () => document.querySelector(SELECTORS.main);
   const rowToggles = () => [...document.querySelectorAll(SELECTORS.rowToggle)];
-  const listIsEmpty = () => document.body.innerText.includes(LABELS.noResults);
+  const listIsEmpty = () => (listArea()?.innerText ?? "").includes(LABELS.noResults);
 
   async function enterSelectMode() {
     if (textElement(LABELS.cancel)) return;
@@ -298,6 +335,7 @@
       }
       lines.push(`${type.label}: ${perYear.join(", ") || "none"}`);
     }
+    checkStop();
     showStatus(`On or before ${cutoff.toLocaleDateString()}:\n${lines.join("\n")}`);
   }
 
@@ -328,8 +366,14 @@
     );
   }
 
+  function countRemoved(type, progress, count) {
+    recordDeleted(count);
+    progress.total += count;
+    progress.byType[type.key] = (progress.byType[type.key] ?? 0) + count;
+  }
+
   // Rows are always taken from the top of the oldest-first list, never from wherever the list happens to be scrolled, so a batch is always the oldest items left.
-  async function deleteBatch(type, size) {
+  async function deleteBatch(type, size, progress) {
     await enterSelectMode();
     for (let index = 0; index < size; index++) {
       const toggle = rowToggles()[index];
@@ -338,10 +382,7 @@
       await pause(CONFIG.selectStepMs);
     }
     const selected = Number(textsMatching(/^\d+ selected$/)[0]?.innerText.match(/\d+/)[0] ?? 0);
-    if (selected === 0) {
-      await exitSelectMode();
-      return { selected: 0, removed: 0 };
-    }
+    if (selected === 0) throw new Error("Nothing could be selected although the list is not empty.");
     const earlierToasts = new Set(textsMatching(type.done));
     (await waitFor(() => textElement(type.action))).click();
     const confirm = await waitFor(() =>
@@ -350,29 +391,30 @@
         .find(Boolean),
     );
     confirm.click();
-    const toast = await waitFor(
+    // Once confirmed the items may already be gone, so the outcome is waited for even through a stop and counted before the stop is honoured; an unconfirmed batch is counted as fully removed so the daily cap never runs low.
+    const toast = await waitEvenIfStopped(
       () => textsMatching(type.done).find((el) => !earlierToasts.has(el)),
       CONFIG.confirmTimeoutMs,
     );
+    if (!toast) {
+      countRemoved(type, progress, selected);
+      throw new Error(`Instagram did not confirm the last batch; up to ${selected} items may have been removed.`);
+    }
+    const removed = Math.min(selected, Number(toast.innerText.match(type.done)[1]));
+    countRemoved(type, progress, removed);
+    if (removed < selected) requestStop(`Instagram removed only ${removed} of ${selected} selected items.`);
     await waitFor(() => !textElement(LABELS.cancel));
-    await sleep(CONFIG.listSettleMs);
-    return { selected, removed: Number(toast.innerText.match(type.done)[1]) };
   }
 
-  // The year's range is re-applied before every batch: Instagram reloads the list after each deletion, and a filter lost in that reload would put newer items at the top of the list.
+  // The year's range is re-applied before every batch: Instagram reloads the list after each deletion, and a filter lost in that reload would put newer items at the top of the list. A year counts as done only when its filtered list says it is empty.
   async function runType(type, ranges, budget, progress, showStatus) {
     let batches = 0;
     for (const range of ranges) {
       while (progress.total < budget) {
         await applyRange(type, range.start, range.end);
         if (listIsEmpty()) break;
-        const size = Math.min(CONFIG.batchSize, budget - progress.total);
-        const { selected, removed } = await deleteBatch(type, size);
-        recordDeleted(removed);
-        progress.total += removed;
-        progress.byType[type.key] = (progress.byType[type.key] ?? 0) + removed;
+        await deleteBatch(type, Math.min(CONFIG.batchSize, budget - progress.total), progress);
         showStatus(`${type.label} from ${range.year}: ${progress.byType[type.key]} removed so far…`);
-        if (removed < selected) requestStop(`Instagram removed only ${removed} of ${selected} selected items.`);
         batches += 1;
         if (progress.total >= budget) break;
         await pause(
@@ -380,7 +422,6 @@
             ? CONFIG.longPauseMinMs + Math.random() * (CONFIG.longPauseMaxMs - CONFIG.longPauseMinMs)
             : jittered(CONFIG.batchPauseMs),
         );
-        if (selected < size) break;
       }
     }
   }
@@ -394,6 +435,7 @@
       progress.current = type;
       await runType(type, ranges, budget, progress, showStatus);
     }
+    checkStop();
     // Only a run that ended below its budget has emptied every selected year; one that hit a cap says which, since more may remain.
     if (progress.total < budget) {
       return `Nothing left on or before ${cutoff.toLocaleDateString()} in the selected types.`;
@@ -482,7 +524,13 @@
         .filter((type) => progress.byType[type.key])
         .map((type) => `${type.label}: ${progress.byType[type.key]} removed\n`)
         .join("");
+    // A run cut short by closing the panel may still be finishing a wait; a second run started from a reopened panel would clear its stop and both would click at once.
     const runFromPanel = (task) => async () => {
+      if (running) {
+        showStatus("The previous run is still stopping; try again in a moment.");
+        return;
+      }
+      running = true;
       stopReason = null;
       const progress = { total: 0, byType: {}, current: null };
       control("count").disabled = true;
@@ -496,6 +544,8 @@
         showStatus(`${removedSummary(progress)}Stopped: ${stopReason ?? error.message}`);
       } finally {
         stopWatching();
+        running = false;
+        activePath = null;
         control("count").disabled = false;
         control("start").disabled = false;
         control("stop").disabled = true;
