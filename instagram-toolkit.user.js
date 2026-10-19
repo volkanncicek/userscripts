@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.19.1
+// @version      2026.10.19.3
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
 // @author       volkan.cicek
 // @match        https://www.instagram.com/*
 // @grant        GM_registerMenuCommand
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-idle
 // @noframes     true
 // ==/UserScript==
@@ -20,8 +22,19 @@
     uiTimeoutMs: 10000,
     uiStepMs: 300,
     listSettleMs: 3000,
-    scrollPauseMs: 1500,
+    scrollPauseMs: 2000,
+    loadTimeoutMs: 600000,
     scrollStableChecks: 3,
+    selectStepMs: 400,
+    confirmTimeoutMs: 20000,
+    batchSize: 20,
+    batchPauseMs: 20000,
+    pauseJitter: 0.15,
+    longPauseEveryBatches: 10,
+    longPauseMinMs: 180000,
+    longPauseMaxMs: 300000,
+    runCap: 300,
+    dailyCap: 1000,
   };
   const SELECTORS = {
     panel: "#igtk-panel",
@@ -29,6 +42,7 @@
     dialog: '[role="dialog"]',
     tab: 'a[role="tab"]',
     rowToggle: '[aria-label="Toggle checkbox"]',
+    loading: '[role="progressbar"]',
   };
   const LABELS = {
     sortFilter: "Sort & Filter",
@@ -37,14 +51,24 @@
     noResults: "No results",
     select: "Select",
     cancel: "Cancel",
+    reset: "Reset",
   };
+  // `action` is the bottom-bar button and its confirmation button; `done` is the toast Instagram shows once the items are gone. Likes were measured live; the other types assume Instagram's "Delete" wording, and a missing button or toast stops the run rather than guessing.
   const TYPES = [
-    { key: "comments", path: "comments", label: "Comments" },
-    { key: "likes", path: "likes", label: "Likes" },
-    { key: "reposts", path: "reposts", label: "Reposts" },
-    { key: "storyReplies", path: "story_replies", label: "Story replies" },
-    { key: "reviews", path: "reviews", label: "Reviews" },
+    { key: "comments", path: "comments", label: "Comments", action: "Delete", done: /^You deleted (\d+)/ },
+    { key: "likes", path: "likes", label: "Likes", action: "Unlike", done: /^You unliked (\d+)/ },
+    { key: "reposts", path: "reposts", label: "Reposts", action: "Delete", done: /^You deleted (\d+)/ },
+    {
+      key: "storyReplies",
+      path: "story_replies",
+      label: "Story replies",
+      action: "Delete",
+      done: /^You deleted (\d+)/,
+    },
+    { key: "reviews", path: "reviews", label: "Reviews", action: "Delete", done: /^You deleted (\d+)/ },
   ];
+  // Counts what was removed today across runs so a second run the same day respects the daily cap; it is never used to resume a run.
+  const DAILY_KEY = "dailyDeleted";
   const ACTIVITY_PATH = "/your_activity/interactions/";
   // Opening the panel from another page needs a full navigation, which drops the panel; this flag survives it so the panel reopens on arrival.
   const REOPEN_FLAG = "igtk-reopen-panel";
@@ -104,41 +128,79 @@
     if (location.pathname.replace(/\/$/, "") !== path) {
       const tab = await waitFor(() => document.querySelector(`${SELECTORS.tab}[href="${path}"]`));
       tab.click();
-      await waitFor(() => location.pathname.replace(/\/$/, "") === path);
+      // The previous tab's toolbar lingers for a moment after the URL changes, so wait for the new tab to be selected and its list to settle before using the toolbar.
+      await waitFor(
+        () => location.pathname.replace(/\/$/, "") === path && tab.getAttribute("aria-selected") === "true",
+      );
+      await sleep(CONFIG.listSettleMs);
     }
     return waitFor(() => buttonWithText(document, LABELS.sortFilter));
   }
 
-  // The dialog holds two Month/Day/Year triples: start first, end second. Start is left at its default, the account's creation date, so the filter covers everything up to the cutoff; oldest first means a run cut short by a cap has removed the oldest items.
-  async function applyCutoff(type, cutoff) {
+  const textElement = (text, root = document) =>
+    [...root.querySelectorAll("span, div")].find((el) => el.childElementCount === 0 && el.innerText?.trim() === text);
+
+  // The dialog holds two Month/Day/Year triples, start then end. Reset restores the widest range (the account's creation date to today) without applying it, so starting from it every date that is set is valid and the creation date can be read.
+  async function openResetFilterDialog(type) {
     (await openType(type)).click();
     const dialog = await waitFor(() =>
       [...document.querySelectorAll(SELECTORS.dialog)].find((el) => el.querySelectorAll("select").length === 6),
     );
-    const selects = () => [...dialog.querySelectorAll("select")];
-    const [startMonth, startDay, startYear] = selects().map((select) => select.value);
-    const error = validateCutoff(cutoff, toLocalDate(startYear, startMonth, startDay), new Date());
-    if (error) {
-      closeDialog(dialog);
-      throw new Error(error);
+    (await waitFor(() => textElement(LABELS.reset, dialog))).click();
+    await sleep(CONFIG.uiStepMs);
+    return dialog;
+  }
+
+  const datesIn = (dialog) => {
+    const values = [...dialog.querySelectorAll("select")].map((select) => select.value);
+    return [toLocalDate(values[2], values[0], values[1]), toLocalDate(values[5], values[3], values[4])];
+  };
+
+  async function accountStartDate(type) {
+    const dialog = await openResetFilterDialog(type);
+    const [start] = datesIn(dialog);
+    closeDialog(dialog);
+    await waitFor(() => !document.contains(dialog));
+    return start;
+  }
+
+  // One calendar year at a time, oldest first: a single year keeps the list short enough to load completely, and a run cut short by a cap has always removed the oldest items.
+  function yearRanges(accountStart, cutoff) {
+    const ranges = [];
+    for (let year = accountStart.getFullYear(); year <= cutoff.getFullYear(); year++) {
+      ranges.push({
+        year,
+        start: year === accountStart.getFullYear() ? accountStart : new Date(year, 0, 1),
+        end: year === cutoff.getFullYear() ? cutoff : new Date(year, 11, 31),
+      });
     }
+    return ranges;
+  }
+
+  async function setDate(selects, offset, date) {
+    await setSelect(selects()[offset + 2], date.getFullYear());
+    await setSelect(selects()[offset], date.getMonth() + 1);
+    await setSelect(selects()[offset + 1], date.getDate());
+  }
+
+  async function applyRange(type, start, end) {
+    const dialog = await openResetFilterDialog(type);
+    const selects = () => [...dialog.querySelectorAll("select")];
     buttonWithText(dialog, LABELS.oldestFirst).click();
     await sleep(CONFIG.uiStepMs);
-    await setSelect(selects()[5], cutoff.getFullYear());
-    await setSelect(selects()[3], cutoff.getMonth() + 1);
-    await setSelect(selects()[4], cutoff.getDate());
+    await setDate(selects, 0, start);
+    await setDate(selects, 3, end);
     // React re-renders the selects after each change, so the values are read back once they settle rather than straight away.
-    const wanted = [cutoff.getMonth() + 1, cutoff.getDate(), cutoff.getFullYear()].join();
+    const wanted = [start, end].map((date) => date.toDateString()).join();
     await waitFor(
       () =>
-        selects()
-          .slice(3)
-          .map((select) => Number(select.value))
+        datesIn(dialog)
+          .map((date) => date.toDateString())
           .join() === wanted,
       CONFIG.uiStepMs * 10,
     ).catch(() => {
       closeDialog(dialog);
-      throw new Error("Instagram did not accept the cutoff date.");
+      throw new Error(`Instagram did not accept the range ${start.toLocaleDateString()}–${end.toLocaleDateString()}.`);
     });
     // Apply stays disabled when the filter already matches, in which case the list is already the one wanted and only the dialog needs closing.
     const apply = buttonWithText(dialog, LABELS.apply);
@@ -147,11 +209,6 @@
     await waitFor(() => !document.contains(dialog));
     await sleep(CONFIG.listSettleMs);
   }
-
-  const textElement = (text) =>
-    [...document.querySelectorAll("span, div")].find(
-      (el) => el.childElementCount === 0 && el.innerText?.trim() === text,
-    );
   const rowToggles = () => [...document.querySelectorAll(SELECTORS.rowToggle)];
   const listIsEmpty = () => document.body.innerText.includes(LABELS.noResults);
 
@@ -175,24 +232,25 @@
     return null;
   }
 
-  // The list lazy-loads as it scrolls, and reading a long list quickly is itself what Instagram treats as automation, so it scrolls at a walking pace until nothing new arrives.
+  // The list lazy-loads slowly while a progress bar shows; stopping when the count merely paused undercounted a year several times over, so it is done only once the bar is gone and the count has held. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace.
   async function loadAllRows() {
-    let seen = rowToggles().length;
-    let unchanged = 0;
-    while (unchanged < CONFIG.scrollStableChecks) {
-      const scroller = scrollableAncestor(rowToggles().at(-1));
-      if (!scroller) break;
-      scroller.scrollTop = scroller.scrollHeight;
+    const deadline = Date.now() + CONFIG.loadTimeoutMs;
+    let seen = -1;
+    let quiet = 0;
+    while (quiet < CONFIG.scrollStableChecks) {
+      if (Date.now() > deadline) throw new Error("The list did not finish loading, so nothing was counted.");
+      scrollableAncestor(rowToggles().at(-1))?.scrollTo(0, Number.MAX_SAFE_INTEGER);
       await sleep(CONFIG.scrollPauseMs);
       const now = rowToggles().length;
-      unchanged = now === seen ? unchanged + 1 : 0;
+      const loading = Boolean(document.querySelector(SELECTORS.loading));
+      quiet = !loading && now === seen ? quiet + 1 : 0;
       seen = now;
     }
     return seen;
   }
 
-  async function countType(type, cutoff) {
-    await applyCutoff(type, cutoff);
+  async function countRange(type, range) {
+    await applyRange(type, range.start, range.end);
     if (listIsEmpty()) return 0;
     await enterSelectMode();
     const count = await loadAllRows();
@@ -201,15 +259,126 @@
   }
 
   async function countAll(types, cutoff, showStatus) {
-    const counts = {};
+    const ranges = yearRanges(await checkedAccountStart(types[0], cutoff), cutoff);
+    const lines = [];
     for (const type of types) {
-      showStatus(`Counting ${type.label.toLowerCase()}…`);
-      counts[type.key] = await countType(type, cutoff);
+      const perYear = [];
+      for (const range of ranges) {
+        showStatus(`Counting ${type.label.toLowerCase()} from ${range.year}…`);
+        const count = await countRange(type, range);
+        if (count) perYear.push(`${range.year}: ${count}`);
+      }
+      lines.push(`${type.label}: ${perYear.join(", ") || "none"}`);
+    }
+    showStatus(`On or before ${cutoff.toLocaleDateString()}:\n${lines.join("\n")}`);
+  }
+
+  async function checkedAccountStart(type, cutoff) {
+    const accountStart = await accountStartDate(type);
+    const error = validateCutoff(cutoff, accountStart, new Date());
+    if (error) throw new Error(error);
+    return accountStart;
+  }
+
+  const localDay = () => new Date().toLocaleDateString("sv");
+
+  function dailyState() {
+    const saved = GM_getValue(DAILY_KEY, null);
+    return saved?.date === localDay() ? saved : { date: localDay(), count: 0 };
+  }
+
+  const remainingDailyAllowance = () => Math.max(0, CONFIG.dailyCap - dailyState().count);
+
+  function recordDeleted(count) {
+    const state = dailyState();
+    GM_setValue(DAILY_KEY, { date: state.date, count: state.count + count });
+  }
+
+  function pause(ms) {
+    return sleep(ms * (1 + (Math.random() * 2 - 1) * CONFIG.pauseJitter));
+  }
+
+  function textsMatching(regex) {
+    return [...document.querySelectorAll("span, div")].filter(
+      (el) => el.childElementCount === 0 && regex.test(el.innerText?.trim() ?? ""),
+    );
+  }
+
+  // Rows are always taken from the top of the oldest-first list, never from wherever the list happens to be scrolled, so a batch is always the oldest items left.
+  async function deleteBatch(type, size) {
+    await enterSelectMode();
+    for (let index = 0; index < size; index++) {
+      const toggle = rowToggles()[index];
+      if (!toggle) break;
+      toggle.click();
+      await sleep(CONFIG.selectStepMs);
+    }
+    const selected = Number(textsMatching(/^\d+ selected$/)[0]?.innerText.match(/\d+/)[0] ?? 0);
+    if (selected === 0) {
+      await exitSelectMode();
+      return { selected: 0, removed: 0 };
+    }
+    const earlierToasts = new Set(textsMatching(type.done));
+    (await waitFor(() => textElement(type.action))).click();
+    const confirm = await waitFor(() =>
+      [...document.querySelectorAll(SELECTORS.dialog)]
+        .map((dialog) => buttonWithText(dialog, type.action))
+        .find(Boolean),
+    );
+    confirm.click();
+    const toast = await waitFor(
+      () => textsMatching(type.done).find((el) => !earlierToasts.has(el)),
+      CONFIG.confirmTimeoutMs,
+    );
+    await waitFor(() => !textElement(LABELS.cancel));
+    await sleep(CONFIG.listSettleMs);
+    return { selected, removed: Number(toast.innerText.match(type.done)[1]) };
+  }
+
+  // The year's range is re-applied before every batch: Instagram reloads the list after each deletion, and a filter lost in that reload would put newer items at the top of the list.
+  async function runType(type, ranges, budget, showStatus) {
+    let deleted = 0;
+    let batches = 0;
+    for (const range of ranges) {
+      while (deleted < budget) {
+        await applyRange(type, range.start, range.end);
+        if (listIsEmpty()) break;
+        const size = Math.min(CONFIG.batchSize, budget - deleted);
+        const { selected, removed } = await deleteBatch(type, size);
+        recordDeleted(removed);
+        deleted += removed;
+        showStatus(`${type.label} from ${range.year}: ${deleted} removed so far…`);
+        if (removed < selected) return { deleted, stoppedBy: `Instagram removed ${removed} of ${selected} selected` };
+        batches += 1;
+        if (deleted >= budget) break;
+        if (batches % CONFIG.longPauseEveryBatches === 0) {
+          await sleep(CONFIG.longPauseMinMs + Math.random() * (CONFIG.longPauseMaxMs - CONFIG.longPauseMinMs));
+        } else {
+          await pause(CONFIG.batchPauseMs);
+        }
+        if (selected < size) break;
+      }
+    }
+    return { deleted, stoppedBy: null };
+  }
+
+  async function runAll(types, cutoff, showStatus) {
+    const ranges = yearRanges(await checkedAccountStart(types[0], cutoff), cutoff);
+    let budget = Math.min(CONFIG.runCap, remainingDailyAllowance());
+    const results = {};
+    for (const type of types) {
+      if (budget === 0) break;
+      results[type.key] = await runType(type, ranges, budget, showStatus);
+      budget -= results[type.key].deleted;
+      if (results[type.key].stoppedBy) break;
     }
     showStatus(
-      `Before ${cutoff.toLocaleDateString()}:\n${types.map((type) => `${type.label}: ${counts[type.key]}`).join("\n")}`,
+      types
+        .filter((type) => results[type.key])
+        .map((type) => `${type.label}: ${results[type.key].deleted} removed`)
+        .join("\n"),
     );
-    return counts;
+    return results;
   }
 
   function buildPanel() {
@@ -243,6 +412,18 @@
       control("start").disabled = true;
       try {
         await countAll(readTypes(), readCutoff(), showStatus);
+      } catch (error) {
+        showStatus(`Stopped: ${error.message}`);
+      } finally {
+        control("count").disabled = false;
+        control("start").disabled = false;
+      }
+    });
+    control("start").addEventListener("click", async () => {
+      control("count").disabled = true;
+      control("start").disabled = true;
+      try {
+        await runAll(readTypes(), readCutoff(), showStatus);
       } catch (error) {
         showStatus(`Stopped: ${error.message}`);
       } finally {
