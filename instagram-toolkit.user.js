@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.19.10
+// @version      2026.10.20
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
@@ -26,7 +26,7 @@
     scrollPauseMs: 2000,
     loadTimeoutMs: 600000,
     loadStallMs: 90000,
-    nudgeEveryChecks: 5,
+    emptyPagesToFinish: 2,
     scrollStableChecks: 3,
     selectStepMs: 400,
     confirmTimeoutMs: 20000,
@@ -102,6 +102,9 @@
 
   let stopReason = null;
   let running = false;
+  // Instagram's list pages arrive through this endpoint; tracking them is what tells a list that is still loading from one that is complete.
+  const PAGE_REQUEST = /\/async\/wbloks\/fetch/;
+  const pageRequests = { inFlight: new Set(), completed: 0 };
   // The tab a run is working on; another activity tab has another filter, so landing there is as much a reason to stop as leaving.
   let activePath = null;
   const requestStop = (reason) => {
@@ -315,33 +318,33 @@
     return null;
   }
 
-  // The list lazy-loads slowly while a progress bar shows; stopping when the count merely paused undercounted a year several times over, so it is done only once the bar is gone and the count has held. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace. Measured: the bar can keep spinning with no new rows for half a minute and then carry on, and once for minutes with no error at all, which a person's scrolling gets past by moving the list. So a list that stops growing is nudged up and back down every few checks, and only one that stays stuck past the stall limit stops the count.
+  // Measured on the likes list: each next page is a request to Instagram that takes 1-6 s, and a new one is only sent when the list is scrolled from well above its foot back down to it, which is what scrolling by hand does; scrolling to a foot it is already at sends nothing. The load-more spinner also stays after the last page, so it cannot say when the list is complete. So the list is asked for more only while no page request is in flight, it counts as complete once pages come back adding nothing, and it stops the count if a request hangs or nothing arrives for too long. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace.
   async function loadAllRows() {
     const deadline = Date.now() + CONFIG.loadTimeoutMs;
-    let seen = -1;
-    let quiet = 0;
-    let stalledSince = Date.now();
-    let checks = 0;
-    while (quiet < CONFIG.scrollStableChecks) {
+    let seen = rowToggles().length;
+    let lastGrowth = Date.now();
+    let completedAtGrowth = pageRequests.completed;
+    while (pageRequests.completed - completedAtGrowth < CONFIG.emptyPagesToFinish || pageRequests.inFlight.size > 0) {
       if (Date.now() > deadline) throw new Error("The list did not finish loading, so nothing was counted.");
       const scroller = scrollableAncestor(rowToggles().at(-1));
-      checks += 1;
-      if (scroller && Date.now() - stalledSince > CONFIG.scrollPauseMs && checks % CONFIG.nudgeEveryChecks === 0) {
-        scroller.scrollTop = Math.max(0, scroller.scrollTop - scroller.clientHeight);
+      if (scroller && pageRequests.inFlight.size === 0) {
+        scroller.scrollTop = 0;
         await pause(CONFIG.uiStepMs);
+        scroller.scrollTop = scroller.scrollHeight;
       }
-      scroller?.scrollTo(0, scroller.scrollHeight);
       await pause(CONFIG.scrollPauseMs);
       const now = rowToggles().length;
-      const loading = Boolean(document.querySelector(SELECTORS.loading));
-      if (now !== seen) stalledSince = Date.now();
-      if (loading && Date.now() - stalledSince > CONFIG.loadStallMs) {
+      if (now > seen) {
+        seen = now;
+        lastGrowth = Date.now();
+        completedAtGrowth = pageRequests.completed;
+      }
+      const oldestInFlight = Math.min(...[...pageRequests.inFlight].map((request) => request.startedAt));
+      if (Date.now() - oldestInFlight > CONFIG.loadStallMs || Date.now() - lastGrowth > CONFIG.loadStallMs * 2) {
         throw new Error(
           "Instagram stopped loading more items, so nothing was counted. It may be slowing down activity; try again later.",
         );
       }
-      quiet = !loading && now === seen ? quiet + 1 : 0;
-      seen = now;
     }
     return seen;
   }
@@ -521,12 +524,24 @@
     const page = unsafeWindow;
     const tooManyRequests = "Instagram answered 429 Too Many Requests. Wait at least 24 hours before running again.";
     let watching = true;
+    pageRequests.inFlight.clear();
+    pageRequests.completed = 0;
     const originalFetch = page.fetch;
     const watchedFetch = function (...args) {
-      return originalFetch.apply(this, args).then((response) => {
-        if (watching && response.status === 429) requestStop(tooManyRequests);
-        return response;
-      });
+      const isPage = PAGE_REQUEST.test(String(args[0]?.url ?? args[0]));
+      const request = { startedAt: Date.now() };
+      if (isPage) pageRequests.inFlight.add(request);
+      return originalFetch.apply(this, args).then(
+        (response) => {
+          if (watching && response.status === 429) requestStop(tooManyRequests);
+          if (pageRequests.inFlight.delete(request)) pageRequests.completed += 1;
+          return response;
+        },
+        (error) => {
+          pageRequests.inFlight.delete(request);
+          throw error;
+        },
+      );
     };
     page.fetch = watchedFetch;
     const originalSend = page.XMLHttpRequest.prototype.send;
