@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20.6
+// @version      2026.10.20.7
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -29,7 +29,8 @@
     listSettleMs: 3000,
     scrollPauseMs: 2000,
     loadTimeoutMs: 600000,
-    loadStallMs: 90000,
+    loadStallMs: 180000,
+    requestGiveUpMs: 30000,
     emptyPagesToFinish: 2,
     scrollStableChecks: 3,
     selectStepMs: 400,
@@ -361,16 +362,20 @@
     return null;
   }
 
-  // Measured on the likes list: each next page is a request to Instagram that takes 1-6 s, and a new one is only sent when the list is scrolled from well above its foot back down to it, which is what scrolling by hand does; scrolling to a foot it is already at sends nothing. The load-more spinner also stays after the last page, so it cannot say when the list is complete. So the list is asked for more only while no page request is in flight, it counts as complete once pages come back adding nothing, and it stops the count if a request hangs or nothing arrives for too long. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace.
-  async function loadAllRows() {
+  // Measured on the likes list: each next page is a request to Instagram that takes 1-6 s, and a new one is only sent when the list is scrolled from well above its foot back down to it, which is what scrolling by hand does; scrolling to a foot it is already at sends nothing. The load-more spinner also stays after the last page, so it cannot say when the list is complete. So the list is asked for more only while no page request is in flight, it counts as complete once pages come back adding nothing, and it stops the count if nothing new arrives for too long. A request left unanswered past its give-up time no longer counts as in flight, since waiting on it would keep the list from ever being asked again. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace.
+  async function loadAllRows(where) {
     const deadline = Date.now() + CONFIG.loadTimeoutMs;
     let seen = rowToggles().length;
     let lastGrowth = Date.now();
     let completedAtGrowth = pageRequests.completed;
-    while (pageRequests.completed - completedAtGrowth < CONFIG.emptyPagesToFinish || pageRequests.inFlight.size > 0) {
-      if (Date.now() > deadline) throw new Error("The list did not finish loading, so nothing was counted.");
+    const pendingSince = () =>
+      [...pageRequests.inFlight]
+        .map((request) => request.startedAt)
+        .filter((startedAt) => Date.now() - startedAt < CONFIG.requestGiveUpMs);
+    while (pageRequests.completed - completedAtGrowth < CONFIG.emptyPagesToFinish || pendingSince().length > 0) {
+      if (Date.now() > deadline) throw new Error(`The ${where} list did not finish loading, so nothing was counted.`);
       const scroller = scrollableAncestor(rowToggles().at(-1));
-      if (scroller && pageRequests.inFlight.size === 0) {
+      if (scroller && pendingSince().length === 0) {
         scroller.scrollTop = 0;
         await pause(CONFIG.uiStepMs);
         scroller.scrollTop = scroller.scrollHeight;
@@ -382,10 +387,12 @@
         lastGrowth = Date.now();
         completedAtGrowth = pageRequests.completed;
       }
-      const oldestInFlight = Math.min(...[...pageRequests.inFlight].map((request) => request.startedAt));
-      if (Date.now() - oldestInFlight > CONFIG.loadStallMs || Date.now() - lastGrowth > CONFIG.loadStallMs * 2) {
+      if (Date.now() - lastGrowth > CONFIG.loadStallMs) {
+        // This stop has not been reproduced by hand, so the message carries what tells its causes apart.
+        const unanswered = pageRequests.inFlight.size;
+        const seconds = Math.round((Date.now() - lastGrowth) / 1000);
         throw new Error(
-          "Instagram stopped loading more items, so nothing was counted. It may be slowing down activity; try again later.",
+          `Instagram stopped loading the ${where} list after ${seen} items: nothing new for ${seconds} s, ${pageRequests.completed - completedAtGrowth} list requests answered since, ${unanswered} unanswered. Nothing was counted; it may be slowing down activity, so try again later.`,
         );
       }
     }
@@ -395,7 +402,7 @@
   async function countRange(type, range) {
     if (!(await applyRange(type, range.start, range.end)) || listIsEmpty()) return 0;
     await enterSelectMode();
-    const count = await loadAllRows();
+    const count = await loadAllRows(`${type.label} ${range.year}`);
     await exitSelectMode();
     return count;
   }
