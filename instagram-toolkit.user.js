@@ -1,17 +1,18 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20.1
+// @version      2026.10.20.2
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
-// @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
+// @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, and keeps links in your own language.
 // @author       volkan.cicek
 // @match        https://www.instagram.com/*
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_addStyle
 // @grant        unsafeWindow
-// @run-at       document-idle
+// @run-at       document-start
 // @noframes     true
 // ==/UserScript==
 
@@ -40,6 +41,9 @@
     maxAncestorSteps: 6,
     runCap: 300,
     dailyCap: 1000,
+    minFrameWidth: 150,
+    heightTolerancePx: 2,
+    counterDebounceMs: 100,
   };
   const SELECTORS = {
     panel: "#igtk-panel",
@@ -50,6 +54,10 @@
     loading: '[role="progressbar"]',
     notice: '[role="dialog"], [role="alert"]',
     main: 'main, [role="main"]',
+    post: "article",
+    // The gallery dots are one button per photo with the active one carrying aria-current="step". The classes around them are obfuscated and change between builds, and the buttons' aria-label follows the UI language, so only the ARIA state is relied on.
+    activeDot: 'button[aria-current="step"]',
+    media: "img, video",
   };
   const LABELS = {
     sortFilter: "Sort & Filter",
@@ -59,6 +67,8 @@
     select: "Select",
     cancel: "Cancel",
     reset: "Reset",
+    next: "Next",
+    previous: "Go back",
   };
   // Instagram's own wording when it limits activity, plus a lost session; any of these stops a run at once.
   const RESTRICTION_TEXT =
@@ -94,6 +104,10 @@
     #igtk-panel .igtk-close { position: absolute; top: 8px; right: 10px; flex: none; padding: 0 6px; background: none; color: #aaa; }
     #igtk-panel .igtk-status { white-space: pre-line; color: #ccc; }
   `;
+  const COUNTER_CLASS = "ig-gallery-counter";
+  const COUNTER_CSS = `
+    .${COUNTER_CLASS} { position: absolute; top: 15px; right: 15px; z-index: 10; padding: 5px 10px; border-radius: 6px; background: rgba(0, 0, 0, 0.85); color: #fff; font: bold 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); pointer-events: none; }
+  `;
 
   // The cleaner matches Instagram's English labels and its restriction warnings, so any other UI language could hide a warning it must stop on.
   const isEnglishUi = () => document.documentElement.lang.toLowerCase().startsWith("en");
@@ -102,6 +116,7 @@
 
   let stopReason = null;
   let running = false;
+  let counterTimer;
   // Instagram's list pages arrive through this endpoint; tracking them is what tells a list that is still loading from one that is complete.
   const PAGE_REQUEST = /\/async\/wbloks\/fetch/;
   const pageRequests = { inFlight: new Set(), completed: 0 };
@@ -561,6 +576,120 @@
     };
   }
 
+  // The dots sit below the photo, and the nearest ancestor holding any media only holds the "liked by" avatars, so the frame is found from the photo itself: climb from the first full-size media through the wrappers that share its height, which ends at the carousel viewport.
+  function findFrame(dotRow) {
+    let node = dotRow.parentElement;
+    for (let step = 0; node && step < CONFIG.maxAncestorSteps; step++, node = node.parentElement) {
+      const photo = [...node.querySelectorAll(SELECTORS.media)].find(
+        (media) => media.getBoundingClientRect().width >= CONFIG.minFrameWidth,
+      );
+      if (!photo) continue;
+      const photoHeight = photo.getBoundingClientRect().height;
+      let frame = photo.parentElement;
+      while (
+        frame.parentElement !== node &&
+        Math.abs(frame.parentElement.getBoundingClientRect().height - photoHeight) <= CONFIG.heightTolerancePx
+      ) {
+        frame = frame.parentElement;
+      }
+      return frame;
+    }
+    return null;
+  }
+
+  function labelGallery(activeDot) {
+    const dotRow = activeDot.parentElement;
+    const allDots = [...dotRow.children].filter((element) => element.tagName === "BUTTON");
+    const activeIndex = allDots.indexOf(activeDot);
+    if (allDots.length < 2 || activeIndex < 0) return;
+    const frame = findFrame(dotRow);
+    if (!frame) return;
+
+    if (getComputedStyle(frame).position === "static") frame.style.position = "relative";
+    let counter = frame.querySelector(`:scope > .${COUNTER_CLASS}`);
+    if (!counter) {
+      counter = document.createElement("div");
+      counter.className = COUNTER_CLASS;
+      frame.append(counter);
+    }
+    const text = `${activeIndex + 1} of ${allDots.length}`;
+    // Writing only on change keeps the gallery observer from re-triggering itself.
+    if (counter.textContent !== text) counter.textContent = text;
+  }
+
+  function scheduleCounterUpdate() {
+    clearTimeout(counterTimer);
+    counterTimer = setTimeout(
+      () => document.querySelectorAll(SELECTORS.activeDot).forEach(labelGallery),
+      CONFIG.counterDebounceMs,
+    );
+  }
+
+  const isTyping = (target) =>
+    target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+
+  // A post opened over a page is the one the keys belong to; otherwise it is the post nearest the middle of the screen.
+  function postInView() {
+    const opened = [...document.querySelectorAll(SELECTORS.dialog)]
+      .map((dialog) => dialog.querySelector(SELECTORS.post))
+      .find(Boolean);
+    if (opened) return opened;
+    const middle = innerHeight / 2;
+    const distance = (post) => {
+      const box = post.getBoundingClientRect();
+      return Math.abs((box.top + box.bottom) / 2 - middle);
+    };
+    return [...document.querySelectorAll(SELECTORS.post)].sort((a, b) => distance(a) - distance(b))[0] ?? null;
+  }
+
+  const buttonsLabelled = (root, label) =>
+    [...root.querySelectorAll(`[aria-label="${label}"]`)].map((element) => element.closest("button")).filter(Boolean);
+
+  // A gallery's own arrows are inside the post; an opened post's arrows to its neighbours are outside it, in the dialog.
+  function stepPost(post, forward) {
+    const dialog = post.closest(SELECTORS.dialog);
+    if (dialog) {
+      const button = buttonsLabelled(dialog, forward ? LABELS.next : LABELS.previous).find((el) => !post.contains(el));
+      button?.click();
+      return Boolean(button);
+    }
+    // The feed keeps empty placeholder posts with no height between real ones; stepping onto one would not move the page.
+    const posts = [...document.querySelectorAll(SELECTORS.post)].filter((el) => el.getBoundingClientRect().height > 0);
+    const target = posts[posts.indexOf(post) + (forward ? 1 : -1)];
+    target?.scrollIntoView({ block: "start" });
+    return Boolean(target);
+  }
+
+  // Measured: in an opened post Instagram's own Left/Right go to the neighbouring post and skip the post's other photos, Shift+arrows do nothing and Esc already closes it; the feed has no arrow keys at all. So the arrows step through the photos of the post in view and, past its first or last photo, are left to Instagram, while Shift+arrows step between posts. The buttons are found by their English labels, so another UI language is left to Instagram's own keys.
+  function onArrowKey(event) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    if (event.ctrlKey || event.altKey || event.metaKey || isTyping(event.target) || !isEnglishUi()) return;
+    const post = postInView();
+    if (!post) return;
+    const forward = event.key === "ArrowRight";
+    let handled;
+    if (event.shiftKey) {
+      handled = stepPost(post, forward);
+    } else {
+      const photoButton = buttonsLabelled(post, forward ? LABELS.next : LABELS.previous)[0];
+      photoButton?.click();
+      handled = Boolean(photoButton);
+    }
+    if (handled) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }
+
+  // Instagram renders a page in whatever language an `hl` parameter names, which links from search engines carry, overriding the user's own setting and the English UI the cleaner needs. Only the parameter named exactly `hl` goes, so other query values that merely contain those letters survive.
+  function dropLanguageParameter() {
+    const url = new URL(location.href);
+    if (!url.searchParams.has("hl")) return false;
+    url.searchParams.delete("hl");
+    location.replace(url.href);
+    return true;
+  }
+
   function buildPanel() {
     const panel = document.createElement("div");
     panel.id = "igtk-panel";
@@ -659,9 +788,26 @@
     document.body.append(buildPanel());
   }
 
+  // The script starts at document-start so a language parameter is dropped before Instagram renders the page in that language; everything else waits for the body.
+  if (dropLanguageParameter()) return;
   GM_registerMenuCommand("Clean up old activity…", openPanel);
-  if (sessionStorage.getItem(REOPEN_FLAG) === "1" && location.pathname.startsWith(ACTIVITY_PATH)) {
-    sessionStorage.removeItem(REOPEN_FLAG);
-    openPanel();
+  function start() {
+    GM_addStyle(COUNTER_CSS);
+    // Swiping only moves aria-current between the dots, and the feed adds galleries as it scrolls, so both kinds of change count.
+    new MutationObserver(scheduleCounterUpdate).observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["aria-current"],
+    });
+    scheduleCounterUpdate();
+    // Capture on window runs before Instagram's own key handlers, which is what lets a photo step replace its post step.
+    window.addEventListener("keydown", onArrowKey, true);
+    if (sessionStorage.getItem(REOPEN_FLAG) === "1" && location.pathname.startsWith(ACTIVITY_PATH)) {
+      sessionStorage.removeItem(REOPEN_FLAG);
+      openPanel();
+    }
   }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true });
+  else start();
 })();
