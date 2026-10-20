@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20.2
+// @version      2026.10.20.3
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, and keeps links in your own language.
@@ -73,7 +73,8 @@
   // Instagram's own wording when it limits activity, plus a lost session; any of these stops a run at once.
   const RESTRICTION_TEXT =
     /try again later|we restrict certain activity|we limit how often|something went wrong|log in/i;
-  const EMPTY_TAB_TEXT = /^No .+ activity$/;
+  // Reviews says "No review activity"; Story replies words its own empty state differently.
+  const EMPTY_TAB_TEXT = /^No .+ activity$|^You haven't responded to any stickers$/;
   // `action` is the bottom-bar button and its confirmation button; `done` is the toast Instagram shows once the items are gone. Likes, comments and story replies were measured live and reposts showed the same Delete button; reviews held nothing to measure, and a missing button or toast stops the run rather than guessing.
   const TYPES = [
     { key: "comments", path: "comments", label: "Comments", action: "Delete", done: /^You deleted (\d+)/ },
@@ -295,8 +296,14 @@
         () => (before ? !before.isConnected : document.querySelector(SELECTORS.loading) || listRow()),
         CONFIG.uiTimeoutMs,
       ).catch(() => {
+        // This stop has not been reproduced by hand, so the message carries what tells its causes apart: which list and range, whether the dialog took the click, and what the list showed before.
+        const range = `${start.toLocaleDateString()}–${end.toLocaleDateString()}`;
+        const dialogState = document.contains(dialog) ? "the filter dialog stayed open" : "the filter dialog closed";
+        const shown = before
+          ? `the old ${before.matches("img") ? "first row" : '"No results"'} stayed`
+          : "nothing was shown";
         throw new Error(
-          "Instagram did not refresh the list after the filter was applied, so nothing was selected. It may be slowing down activity; try again later.",
+          `Instagram did not refresh the ${type.label} list for ${range} (${dialogState}; ${shown}), so nothing was selected. It may be slowing down activity; try again later.`,
         );
       });
     }
