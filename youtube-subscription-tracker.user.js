@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Subscription Tracker
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.16
+// @version      2026.10.20
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/youtube-subscription-tracker.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/youtube-subscription-tracker.user.js
 // @description  Auto-track which Subscription videos you've opened and resume scanning from where you left off
@@ -39,6 +39,7 @@
     STATUS_FOUND: "Found!",
     STATUS_CLEARED: "Cleared!",
     STATUS_NOTFOUND: "Not found",
+    STATUS_NEAREST: "Last video gone, went to the nearest",
   };
 
   const TIME_UNITS = [
@@ -59,6 +60,8 @@
     debounceMs: 300,
     pageChangeDebounceMs: 1_500,
     maxScrollAttempts: 50,
+    // Videos opened in one sitting sit within a few loads of each other, so once this many videos have loaded past the first opened one, the last-opened one is gone from the feed. Counted in videos rather than loads so a second Resume on an already loaded feed does not load more.
+    videosPastFirstOpened: 100,
     pollIntervalMs: 100,
     maxPollAttempts: 60,
     statusClearMs: 2_000,
@@ -506,36 +509,43 @@
       this._updateUI();
 
       const resumeId = this.opened[0].id;
-      let found = false;
+      let target = null;
+      let nearest = false;
       try {
-        let target = this._findVideoById(getAllLoadedVideos(), resumeId);
+        target = this._findVideoById(getAllLoadedVideos(), resumeId);
 
         if (!target) {
           window.scrollTo({ top: 0, behavior: "auto" });
           await wait(300);
           let attempts = 0;
+          const openedIds = new Set(this.opened.map((entry) => entry.id));
           // Stops when the user navigates away mid-search, or it would keep scrolling whatever page came next.
           while (attempts < CONFIG.maxScrollAttempts && this.active) {
-            target = this._findVideoById(getAllLoadedVideos(), resumeId);
+            const videos = getAllLoadedVideos();
+            target = this._findVideoById(videos, resumeId);
             if (target) break;
+            // A last-opened video that was deleted or made private never loads, and searching only for it scrolled weeks past the user's place.
+            const firstOpened = videos.findIndex((video) => openedIds.has(video.id));
+            if (firstOpened !== -1 && videos.length - firstOpened > CONFIG.videosPastFirstOpened) break;
             if (!(await scrollAndLoadMore())) break;
             attempts++;
             await wait(400);
           }
+          if (!target) {
+            target = this._findLatestOpened(getAllLoadedVideos());
+            nearest = Boolean(target);
+          }
         }
 
-        if (target) {
-          this._goTo(target);
-          found = true;
-        }
+        if (target) this._goTo(target);
       } catch (error) {
         log.error("Resume error:", error);
       } finally {
         this.isSearching = false;
         this._updateUI();
         this._setStatus(
-          found ? UI_TEXT.STATUS_FOUND : UI_TEXT.STATUS_NOTFOUND,
-          found ? CONFIG.statusSuccessColor : CONFIG.statusErrorColor,
+          !target ? UI_TEXT.STATUS_NOTFOUND : nearest ? UI_TEXT.STATUS_NEAREST : UI_TEXT.STATUS_FOUND,
+          target ? CONFIG.statusSuccessColor : CONFIG.statusErrorColor,
         );
         this._clearStatusAfterDelay();
       }
@@ -544,6 +554,15 @@
     _findVideoById(videos, id) {
       for (const video of videos) {
         if (video.id === id && document.body.contains(video.element)) return video;
+      }
+      return null;
+    }
+
+    _findLatestOpened(videos) {
+      const loaded = new Map(videos.map((video) => [video.id, video]));
+      for (const entry of this.opened) {
+        const video = loaded.get(entry.id);
+        if (video && document.body.contains(video.element)) return video;
       }
       return null;
     }
