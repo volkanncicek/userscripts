@@ -1,9 +1,5 @@
 # TODO
 
-## YouTube Subscription Tracker
-
-- On 2026-10-20 the Resume box was drawn at the bottom right instead of beside the shelf's subscribe button, which is the floating fallback `_initWhenReady` uses when `SELECTORS.shelfSubscribeButton` has not appeared within `maxPollAttempts` polls. Check on the live page whether the selector no longer matches or the shelf header simply rendered late.
-
 ## Instagram Toolkit
 
 - The story download needs the story's id in the address, which the viewer adds only after stepping to another story, so the story it opens on asks the user to step away and back. Reading the opening story's id would mean the user's id for `/api/v1/feed/reels_media/?reel_ids=`, and `/api/v1/users/web_profile_info/` answered 429 after three requests on 2026-10-20. Highlights are left out because their address carries the highlight's id.

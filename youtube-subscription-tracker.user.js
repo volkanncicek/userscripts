@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Subscription Tracker
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20
+// @version      2026.10.20.1
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/youtube-subscription-tracker.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/youtube-subscription-tracker.user.js
 // @description  Auto-track which Subscription videos you've opened and resume scanning from where you left off
@@ -363,7 +363,10 @@
     _ensureUI() {
       if (this.isSearching || this.initializing) return;
       const ui = document.getElementById(UI_CONTAINER_ID);
-      if (ui?.isConnected && ui.style.display !== "none") return;
+      // The floating UI only stands in for a shelf header that had not rendered yet, and would otherwise stay in the corner after the header arrives.
+      const headerArrived =
+        ui?.parentElement === document.body && document.querySelector(SELECTORS.shelfSubscribeButton);
+      if (ui?.isConnected && ui.style.display !== "none" && !headerArrived) return;
       this._initWhenReady();
     }
 
