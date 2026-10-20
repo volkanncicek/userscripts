@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Subscription Tracker
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20.1
+// @version      2026.10.20.2
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/youtube-subscription-tracker.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/youtube-subscription-tracker.user.js
 // @description  Auto-track which Subscription videos you've opened and resume scanning from where you left off
@@ -503,7 +503,7 @@
       }, CONFIG.statusClearMs);
     }
 
-    // Resume = last clicked video (opened[0]), same target as the UI time indicator.
+    // Resume = last clicked video (opened[0]), same target as the UI time indicator, or the latest opened one still in the feed once opened[0] has left it.
     async _resume() {
       if (this.isSearching || this.opened.length === 0) return;
 
