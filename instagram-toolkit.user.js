@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20.5
+// @version      2026.10.20.6
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -64,6 +64,7 @@
     like: 'svg[aria-label="Like"], svg[aria-label="Unlike"]',
     comment: 'svg[aria-label="Comment"]',
     download: ".igtk-download",
+    storyDownload: ".igtk-story-download",
   };
   const LABELS = {
     sortFilter: "Sort & Filter",
@@ -116,12 +117,17 @@
     .${COUNTER_CLASS} { position: absolute; top: 15px; right: 15px; z-index: 10; padding: 5px 10px; border-radius: 6px; background: rgba(0, 0, 0, 0.85); color: #fff; font: bold 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); pointer-events: none; }
     .igtk-download { display: flex; padding: 8px; border: 0; background: none; color: inherit; cursor: pointer; }
     .igtk-download:disabled { opacity: 0.4; cursor: progress; }
+    .igtk-download[data-failed] { color: #ed4956; }
+    .igtk-story-download { position: fixed; top: 16px; right: 72px; z-index: 2147483000; color: #fff; }
   `;
   const DOWNLOAD_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 17v3h16v-3"/></svg>`;
   // A post's address carries a shortcode, which is its numeric media id written in this base-64 alphabet.
   const SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   // The reels feed keeps the reel on screen in the address as /reels/<code>/, and its "original audio" links use /reels/audio/<id>/, which is not a post.
   const POST_PATH = /^\/(?:[\w.]+\/)?(?:p|reels?)\/(?!audio\/)([\w-]+)/;
+  // A highlight's address carries the highlight's id rather than a story's, so highlights are left out.
+  const STORY_VIEWER_PATH = /^\/stories\/(?!highlights\/)[\w.]+\//;
+  const STORY_PATH = /^\/stories\/(?!highlights\/)[\w.]+\/(\d+)/;
   // The web client's app id, which Instagram's own requests carry; without it the media endpoint answers 400 "useragent mismatch".
   const IG_APP_ID = "936619743392459";
 
@@ -738,37 +744,57 @@
   const shortcodeToId = (code) =>
     [...code].reduce((id, char) => id * 64n + BigInt(SHORTCODE_ALPHABET.indexOf(char)), 0n).toString();
 
-  // One request per click, the same one Instagram's own client makes when it opens a post, so a download looks like viewing a post rather than like scraping.
-  async function mediaInfo(code) {
-    const response = await fetch(`/api/v1/media/${shortcodeToId(code)}/info/`, {
+  // One request per click, the same one Instagram's own client makes when it opens a post, so a download looks like viewing a post rather than like scraping. It answers for a story's id as well.
+  async function mediaInfo(mediaId) {
+    const response = await fetch(`/api/v1/media/${mediaId}/info/`, {
       headers: { "x-ig-app-id": IG_APP_ID },
       credentials: "include",
     });
-    if (!response.ok) throw new Error(`Instagram answered ${response.status} for post ${code}.`);
+    if (!response.ok) throw new Error(`Instagram answered ${response.status} for media ${mediaId}.`);
     const item = (await response.json()).items?.[0];
-    if (!item) throw new Error(`Instagram returned no media for post ${code}.`);
+    if (!item) throw new Error(`Instagram returned nothing for media ${mediaId}.`);
     return item;
   }
+
+  const dateStamp = (item) => {
+    const taken = new Date(item.taken_at * 1000);
+    return `${taken.getFullYear()}-${twoDigits(taken.getMonth() + 1)}-${twoDigits(taken.getDate())}`;
+  };
+  const extensionOf = (url) => new URL(url).pathname.split(".").pop();
 
   const largest = (versions) => versions.reduce((best, version) => (version.width > best.width ? version : best));
   const mediaUrl = (media) =>
     media.video_versions?.length ? largest(media.video_versions).url : largest(media.image_versions2.candidates).url;
 
   async function downloadPost(code, index, wholeGallery) {
-    const item = await mediaInfo(code);
+    const item = await mediaInfo(shortcodeToId(code));
     const parts = item.carousel_media ?? [item];
     const positions = wholeGallery ? parts.map((_, position) => position) : [parts[index] ? index : 0];
-    const taken = new Date(item.taken_at * 1000);
-    const stem = `${item.user.username}-${taken.getFullYear()}-${twoDigits(taken.getMonth() + 1)}-${twoDigits(taken.getDate())}-${code}`;
+    const stem = `${item.user.username}-${dateStamp(item)}-${code}`;
     const files = await Promise.all(
       positions.map(async (position) => {
         const url = mediaUrl(parts[position]);
-        const extension = new URL(url).pathname.split(".").pop();
-        return { name: `${stem}-${twoDigits(position + 1)}.${extension}`, bytes: await fetchBytes(url) };
+        return { name: `${stem}-${twoDigits(position + 1)}.${extensionOf(url)}`, bytes: await fetchBytes(url) };
       }),
     );
     if (files.length === 1) saveBlob(new Blob([files[0].bytes]), files[0].name);
     else saveBlob(buildZip(files), `${stem}.zip`);
+  }
+
+  // Measured: the story viewer puts the story's id in the address only once you step to another story; the story it opens on has none, and its video plays from a blob, so there is nothing else on the page to download it by.
+  async function downloadStory() {
+    const storyId = location.pathname.match(STORY_PATH)?.[1];
+    if (!storyId) {
+      throw new Error(
+        "Instagram has not put this story in the address yet. Step to the next story and back, then download.",
+      );
+    }
+    const item = await mediaInfo(storyId);
+    const url = mediaUrl(item);
+    saveBlob(
+      new Blob([await fetchBytes(url)]),
+      `${item.user.username}-${dateStamp(item)}-story-${storyId}.${extensionOf(url)}`,
+    );
   }
 
   // An opened post and a post page show the post in the address; a post in the feed links to itself.
@@ -791,33 +817,50 @@
     return position > 0 ? position - 1 : 0;
   }
 
-  function createDownloadButton(root) {
+  // A failure turns the icon red and puts the reason in its tooltip, so a click that saved nothing does not pass silently.
+  function createDownloadButton(idleTitle, download) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "igtk-download";
     button.innerHTML = DOWNLOAD_ICON;
-    const idleTitle = "Download (Shift+click: the whole gallery as one zip)";
     button.title = idleTitle;
     button.addEventListener("click", async (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const code = postCode(root);
-      if (!code) {
-        button.title = "Download failed: this post's address was not found.";
-        return;
-      }
       button.disabled = true;
       button.title = idleTitle;
+      delete button.dataset.failed;
       try {
-        await downloadPost(code, shownIndex(root), event.shiftKey);
+        await download(event);
       } catch (error) {
         log(error);
+        button.dataset.failed = "";
         button.title = `Download failed: ${error.message}`;
       } finally {
         button.disabled = false;
       }
     });
     return button;
+  }
+
+  const createPostDownloadButton = (root) =>
+    createDownloadButton("Download (Shift+click: the whole gallery as one zip)", (event) => {
+      const code = postCode(root);
+      if (!code) throw new Error("This post's address was not found.");
+      return downloadPost(code, shownIndex(root), event.shiftKey);
+    });
+
+  // The story viewer has no action row to sit in, so its button is fixed beside the viewer's close button and leaves with the viewer.
+  function updateStoryButton() {
+    const existing = document.querySelector(SELECTORS.storyDownload);
+    if (!STORY_VIEWER_PATH.test(location.pathname)) {
+      existing?.remove();
+      return;
+    }
+    if (existing) return;
+    const button = createDownloadButton("Download this story", downloadStory);
+    button.classList.add("igtk-story-download");
+    document.body.append(button);
   }
 
   // The like button's nearest ancestor that also holds the comment button is the post's action row. A comment's own like heart has no comment button beside it, so its nearest such ancestor is the whole post, which holds more than one like button and is skipped.
@@ -827,7 +870,7 @@
       let row = like.parentElement;
       while (row && !row.querySelector(SELECTORS.comment)) row = row.parentElement;
       if (!row || row.querySelectorAll(SELECTORS.like).length !== 1 || row.querySelector(SELECTORS.download)) continue;
-      row.append(createDownloadButton(row.closest(SELECTORS.post) ?? document.querySelector(SELECTORS.main)));
+      row.append(createPostDownloadButton(row.closest(SELECTORS.post) ?? document.querySelector(SELECTORS.main)));
     }
   }
 
@@ -836,6 +879,7 @@
     pageUpdateTimer = setTimeout(() => {
       document.querySelectorAll(SELECTORS.activeDot).forEach(labelGallery);
       addDownloadButtons();
+      updateStoryButton();
     }, CONFIG.pageUpdateDebounceMs);
   }
 

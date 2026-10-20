@@ -2,7 +2,7 @@
 
 ## Instagram Toolkit
 
-- Download stories too. Posts and reels have a download button; stories do not yet. `/api/v1/feed/reels_media/?reel_ids=<user id>` answers with the user's current stories, but trying it live means opening someone's story, which tells them you watched it, so pick the account with the user first.
+- The story download needs the story's id in the address, which the viewer adds only after stepping to another story, so the story it opens on asks the user to step away and back. Reading the opening story's id would mean the user's id for `/api/v1/feed/reels_media/?reel_ids=`, and `/api/v1/users/web_profile_info/` answered 429 after three requests on 2026-10-20. Highlights are left out because their address carries the highlight's id.
 
 ## Footprint cleaners for other platforms
 
