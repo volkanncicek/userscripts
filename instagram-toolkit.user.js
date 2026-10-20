@@ -1,16 +1,19 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20.3
+// @version      2026.10.20.4
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
-// @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, and keeps links in your own language.
+// @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
 // @author       volkan.cicek
 // @match        https://www.instagram.com/*
+// @connect      fbcdn.net
+// @connect      cdninstagram.com
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @run-at       document-start
 // @noframes     true
@@ -43,7 +46,7 @@
     dailyCap: 1000,
     minFrameWidth: 150,
     heightTolerancePx: 2,
-    counterDebounceMs: 100,
+    pageUpdateDebounceMs: 100,
   };
   const SELECTORS = {
     panel: "#igtk-panel",
@@ -58,6 +61,9 @@
     // The gallery dots are one button per photo with the active one carrying aria-current="step". The classes around them are obfuscated and change between builds, and the buttons' aria-label follows the UI language, so only the ARIA state is relied on.
     activeDot: 'button[aria-current="step"]',
     media: "img, video",
+    like: 'svg[aria-label="Like"], svg[aria-label="Unlike"]',
+    comment: 'svg[aria-label="Comment"]',
+    download: ".igtk-download",
   };
   const LABELS = {
     sortFilter: "Sort & Filter",
@@ -108,7 +114,15 @@
   const COUNTER_CLASS = "ig-gallery-counter";
   const COUNTER_CSS = `
     .${COUNTER_CLASS} { position: absolute; top: 15px; right: 15px; z-index: 10; padding: 5px 10px; border-radius: 6px; background: rgba(0, 0, 0, 0.85); color: #fff; font: bold 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); pointer-events: none; }
+    .igtk-download { display: flex; padding: 8px; border: 0; background: none; color: inherit; cursor: pointer; }
+    .igtk-download:disabled { opacity: 0.4; cursor: progress; }
   `;
+  const DOWNLOAD_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 17v3h16v-3"/></svg>`;
+  // A post's address carries a shortcode, which is its numeric media id written in this base-64 alphabet.
+  const SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const POST_PATH = /^\/(?:[\w.]+\/)?(?:p|reel)\/([\w-]+)/;
+  // The web client's app id, which Instagram's own requests carry; without it the media endpoint answers 400 "useragent mismatch".
+  const IG_APP_ID = "936619743392459";
 
   // The cleaner matches Instagram's English labels and its restriction warnings, so any other UI language could hide a warning it must stop on.
   const isEnglishUi = () => document.documentElement.lang.toLowerCase().startsWith("en");
@@ -117,7 +131,7 @@
 
   let stopReason = null;
   let running = false;
-  let counterTimer;
+  let pageUpdateTimer;
   // Instagram's list pages arrive through this endpoint; tracking them is what tells a list that is still loading from one that is complete.
   const PAGE_REQUEST = /\/async\/wbloks\/fetch/;
   const pageRequests = { inFlight: new Set(), completed: 0 };
@@ -624,18 +638,210 @@
     if (counter.textContent !== text) counter.textContent = text;
   }
 
-  function scheduleCounterUpdate() {
-    clearTimeout(counterTimer);
-    counterTimer = setTimeout(
-      () => document.querySelectorAll(SELECTORS.activeDot).forEach(labelGallery),
-      CONFIG.counterDebounceMs,
+  const log = (...args) => console.log("[Instagram Toolkit]", ...args);
+  const twoDigits = (number) => String(number).padStart(2, "0");
+
+  const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+
+  function crc32(bytes) {
+    let crc = 0xffffffff;
+    for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function dosDateTime(date) {
+    return {
+      time: (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1),
+      date: ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+    };
+  }
+
+  // Photos and videos are already compressed, so entries are stored rather than deflated; that keeps the zip writer small enough to inline instead of depending on a library. Layout follows PKWARE's APPNOTE: a local header before each file, then the central directory, then the end record.
+  function buildZip(files) {
+    const encoder = new TextEncoder();
+    const { time, date } = dosDateTime(new Date());
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+
+    for (const { name, bytes } of files) {
+      const nameBytes = encoder.encode(name);
+      const crc = crc32(bytes);
+
+      const local = new DataView(new ArrayBuffer(30));
+      local.setUint32(0, 0x04034b50, true);
+      local.setUint16(4, 20, true);
+      local.setUint16(6, 0x0800, true);
+      local.setUint16(10, time, true);
+      local.setUint16(12, date, true);
+      local.setUint32(14, crc, true);
+      local.setUint32(18, bytes.length, true);
+      local.setUint32(22, bytes.length, true);
+      local.setUint16(26, nameBytes.length, true);
+      localParts.push(local, nameBytes, bytes);
+
+      const central = new DataView(new ArrayBuffer(46));
+      central.setUint32(0, 0x02014b50, true);
+      central.setUint16(4, 20, true);
+      central.setUint16(6, 20, true);
+      central.setUint16(8, 0x0800, true);
+      central.setUint16(12, time, true);
+      central.setUint16(14, date, true);
+      central.setUint32(16, crc, true);
+      central.setUint32(20, bytes.length, true);
+      central.setUint32(24, bytes.length, true);
+      central.setUint16(28, nameBytes.length, true);
+      central.setUint32(42, offset, true);
+      centralParts.push(central, nameBytes);
+
+      offset += 30 + nameBytes.length + bytes.length;
+    }
+
+    const centralSize = centralParts.reduce((sum, part) => sum + part.byteLength, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true);
+    end.setUint16(8, files.length, true);
+    end.setUint16(10, files.length, true);
+    end.setUint32(12, centralSize, true);
+    end.setUint32(16, offset, true);
+    return new Blob([...localParts, ...centralParts, end], { type: "application/zip" });
+  }
+
+  // The media sit on Instagram's CDN, another origin, which a page fetch cannot read; GM_xmlhttpRequest can, for the hosts in @connect.
+  const fetchBytes = (url) =>
+    new Promise((resolve, reject) =>
+      GM_xmlhttpRequest({
+        url,
+        responseType: "arraybuffer",
+        onload: (response) =>
+          response.status === 200
+            ? resolve(new Uint8Array(response.response))
+            : reject(new Error(`The file answered ${response.status}.`)),
+        onerror: () => reject(new Error("The file could not be fetched.")),
+        ontimeout: () => reject(new Error("Fetching the file timed out.")),
+      }),
     );
+
+  // A link with a download attribute keeps the chosen name, which GM_download loses whenever a download-manager extension is installed; a gallery goes as one zip because Chrome holds back repeated downloads from a page until the site is allowed to download multiple files, a refusal the page cannot see.
+  function saveBlob(blob, name) {
+    const href = URL.createObjectURL(blob);
+    Object.assign(document.createElement("a"), { href, download: name }).click();
+    // The browser reads the blob after the click returns, so revoking at once would cancel the save.
+    setTimeout(() => URL.revokeObjectURL(href), 60_000);
+  }
+
+  const shortcodeToId = (code) =>
+    [...code].reduce((id, char) => id * 64n + BigInt(SHORTCODE_ALPHABET.indexOf(char)), 0n).toString();
+
+  // One request per click, the same one Instagram's own client makes when it opens a post, so a download looks like viewing a post rather than like scraping.
+  async function mediaInfo(code) {
+    const response = await fetch(`/api/v1/media/${shortcodeToId(code)}/info/`, {
+      headers: { "x-ig-app-id": IG_APP_ID },
+      credentials: "include",
+    });
+    if (!response.ok) throw new Error(`Instagram answered ${response.status} for post ${code}.`);
+    const item = (await response.json()).items?.[0];
+    if (!item) throw new Error(`Instagram returned no media for post ${code}.`);
+    return item;
+  }
+
+  const largest = (versions) => versions.reduce((best, version) => (version.width > best.width ? version : best));
+  const mediaUrl = (media) =>
+    media.video_versions?.length ? largest(media.video_versions).url : largest(media.image_versions2.candidates).url;
+
+  async function downloadPost(code, index, wholeGallery) {
+    const item = await mediaInfo(code);
+    const parts = item.carousel_media ?? [item];
+    const positions = wholeGallery ? parts.map((_, position) => position) : [parts[index] ? index : 0];
+    const taken = new Date(item.taken_at * 1000);
+    const stem = `${item.user.username}-${taken.getFullYear()}-${twoDigits(taken.getMonth() + 1)}-${twoDigits(taken.getDate())}-${code}`;
+    const files = await Promise.all(
+      positions.map(async (position) => {
+        const url = mediaUrl(parts[position]);
+        const extension = new URL(url).pathname.split(".").pop();
+        return { name: `${stem}-${twoDigits(position + 1)}.${extension}`, bytes: await fetchBytes(url) };
+      }),
+    );
+    if (files.length === 1) saveBlob(new Blob([files[0].bytes]), files[0].name);
+    else saveBlob(buildZip(files), `${stem}.zip`);
+  }
+
+  // An opened post and a post page show the post in the address; a post in the feed links to itself.
+  function postCode(root) {
+    if (root.closest(SELECTORS.dialog) || !root.matches(SELECTORS.post)) {
+      return location.pathname.match(POST_PATH)?.[1] ?? null;
+    }
+    for (const link of root.querySelectorAll("a[href]")) {
+      const code = link.getAttribute("href").match(POST_PATH)?.[1];
+      if (code) return code;
+    }
+    return null;
+  }
+
+  // The feed marks the photo on show with its dots; an opened post and a post page have no such dots and keep it in the address instead.
+  function shownIndex(root) {
+    const dot = root.querySelector(SELECTORS.activeDot);
+    if (dot) return [...dot.parentElement.children].filter((element) => element.tagName === "BUTTON").indexOf(dot);
+    const position = Number(new URL(location.href).searchParams.get("img_index"));
+    return position > 0 ? position - 1 : 0;
+  }
+
+  function createDownloadButton(root) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "igtk-download";
+    button.innerHTML = DOWNLOAD_ICON;
+    const idleTitle = "Download (Shift+click: the whole gallery as one zip)";
+    button.title = idleTitle;
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const code = postCode(root);
+      if (!code) {
+        button.title = "Download failed: this post's address was not found.";
+        return;
+      }
+      button.disabled = true;
+      button.title = idleTitle;
+      try {
+        await downloadPost(code, shownIndex(root), event.shiftKey);
+      } catch (error) {
+        log(error);
+        button.title = `Download failed: ${error.message}`;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    return button;
+  }
+
+  // The like button's nearest ancestor that also holds the comment button is the post's action row. A comment's own like heart has no comment button beside it, so its nearest such ancestor is the whole post, which holds more than one like button and is skipped.
+  function addDownloadButtons() {
+    if (!isEnglishUi()) return;
+    for (const like of document.querySelectorAll(SELECTORS.like)) {
+      let row = like.parentElement;
+      while (row && !row.querySelector(SELECTORS.comment)) row = row.parentElement;
+      if (!row || row.querySelectorAll(SELECTORS.like).length !== 1 || row.querySelector(SELECTORS.download)) continue;
+      row.append(createDownloadButton(row.closest(SELECTORS.post) ?? document.querySelector(SELECTORS.main)));
+    }
+  }
+
+  function schedulePageUpdate() {
+    clearTimeout(pageUpdateTimer);
+    pageUpdateTimer = setTimeout(() => {
+      document.querySelectorAll(SELECTORS.activeDot).forEach(labelGallery);
+      addDownloadButtons();
+    }, CONFIG.pageUpdateDebounceMs);
   }
 
   const isTyping = (target) =>
     target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
 
-  // A post opened over a page is the one the keys belong to; otherwise it is the post nearest the middle of the screen.
+  // A post opened over a page is the one the keys belong to; otherwise it is the post nearest the middle of the screen. A post page has no article around its post, so there the page itself is the post.
   function postInView() {
     const opened = [...document.querySelectorAll(SELECTORS.dialog)]
       .map((dialog) => dialog.querySelector(SELECTORS.post))
@@ -646,7 +852,9 @@
       const box = post.getBoundingClientRect();
       return Math.abs((box.top + box.bottom) / 2 - middle);
     };
-    return [...document.querySelectorAll(SELECTORS.post)].sort((a, b) => distance(a) - distance(b))[0] ?? null;
+    const nearest = [...document.querySelectorAll(SELECTORS.post)].sort((a, b) => distance(a) - distance(b))[0];
+    if (nearest) return nearest;
+    return POST_PATH.test(location.pathname) ? document.querySelector(SELECTORS.main) : null;
   }
 
   const buttonsLabelled = (root, label) =>
@@ -662,7 +870,8 @@
     }
     // The feed keeps empty placeholder posts with no height between real ones; stepping onto one would not move the page.
     const posts = [...document.querySelectorAll(SELECTORS.post)].filter((el) => el.getBoundingClientRect().height > 0);
-    const target = posts[posts.indexOf(post) + (forward ? 1 : -1)];
+    const position = posts.indexOf(post);
+    const target = position < 0 ? null : posts[position + (forward ? 1 : -1)];
     target?.scrollIntoView({ block: "start" });
     return Boolean(target);
   }
@@ -801,13 +1010,13 @@
   function start() {
     GM_addStyle(COUNTER_CSS);
     // Swiping only moves aria-current between the dots, and the feed adds galleries as it scrolls, so both kinds of change count.
-    new MutationObserver(scheduleCounterUpdate).observe(document.body, {
+    new MutationObserver(schedulePageUpdate).observe(document.body, {
       childList: true,
       subtree: true,
       attributes: true,
       attributeFilter: ["aria-current"],
     });
-    scheduleCounterUpdate();
+    schedulePageUpdate();
     // Capture on window runs before Instagram's own key handlers, which is what lets a photo step replace its post step.
     window.addEventListener("keydown", onArrowKey, true);
     if (sessionStorage.getItem(REOPEN_FLAG) === "1" && location.pathname.startsWith(ACTIVITY_PATH)) {
