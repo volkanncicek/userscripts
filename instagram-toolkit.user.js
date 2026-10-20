@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20
+// @version      2026.10.20.1
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity: removes your comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it.
@@ -273,11 +273,11 @@
       closeDialog(dialog);
       await waitFor(() => !document.contains(dialog));
     } else {
-      // Measured: Apply empties the list within about 100 ms and the filtered list arrives 1-3 s later. The old list's first row going away is the proof it was replaced, so no row of it can be selected; a long list keeps a load-more spinner at its foot, so a spinner proves nothing unless the old list was empty. A list that never visibly turns over stops the run.
-      const firstRowBefore = listRow();
+      // Measured: Apply replaces the list's content within about 100 ms and the filtered list arrives 1-3 s later. The old list's first row, or its "No results" element when it was empty, going away is the proof it was replaced, so no row of it can be selected. The spinner in between can be shown for only 300 ms, which a background tab's throttled timers miss, and a long list keeps a load-more spinner at its foot anyway, so it is the fallback only for a list that showed neither. A list that never visibly turns over stops the run.
+      const before = listRow() || textElement(LABELS.noResults, listArea() ?? document);
       apply.click();
       await waitFor(
-        () => (firstRowBefore ? listRow() !== firstRowBefore : document.querySelector(SELECTORS.loading) || listRow()),
+        () => (before ? !before.isConnected : document.querySelector(SELECTORS.loading) || listRow()),
         CONFIG.uiTimeoutMs,
       ).catch(() => {
         throw new Error(
