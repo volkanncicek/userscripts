@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20.4
+// @version      2026.10.20.5
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -120,7 +120,8 @@
   const DOWNLOAD_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 17v3h16v-3"/></svg>`;
   // A post's address carries a shortcode, which is its numeric media id written in this base-64 alphabet.
   const SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  const POST_PATH = /^\/(?:[\w.]+\/)?(?:p|reel)\/([\w-]+)/;
+  // The reels feed keeps the reel on screen in the address as /reels/<code>/, and its "original audio" links use /reels/audio/<id>/, which is not a post.
+  const POST_PATH = /^\/(?:[\w.]+\/)?(?:p|reels?)\/(?!audio\/)([\w-]+)/;
   // The web client's app id, which Instagram's own requests carry; without it the media endpoint answers 400 "useragent mismatch".
   const IG_APP_ID = "936619743392459";
 

@@ -11,7 +11,6 @@ Installed from their own source and updated from there; listed so a new browser 
 | Download Original Picture | https://greasyfork.org/scripts/396746 |
 | Geocaching Map Enhancements | https://raw.githubusercontent.com/2Abendsegler/GME/main/Geocaching_Map_Enhancements.user.js |
 | Greasy Fork Enhance | https://greasyfork.org/scripts/467078 |
-| Instagram Download Button | https://greasyfork.org/scripts/406535 |
 | LinkedIn Job Skills Highlighter | https://greasyfork.org/scripts/527243 |
 | LinkedIn Reposted & Apply Highlighter | https://greasyfork.org/scripts/554639 |
 | Linkedin Sponsor Block | https://greasyfork.org/scripts/546877 |

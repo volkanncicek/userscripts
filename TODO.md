@@ -2,7 +2,7 @@
 
 ## Instagram Toolkit
 
-- Bring downloading into the Toolkit so it is maintained here: a download button on posts, reels and stories, files fetched with `GM_xmlhttpRequest` and a gallery saved as one zip (as `sahibinden-photo-downloader` does), named user-date-id as now. "Instagram Download Button" (MIT, last updated 2024-03) still saved a gallery photo at full size on 2026-10-20, but its feedback reports videos and stories failing; finding a video's real URL is the hard part. Drop it from `third-party.md` once ours ships.
+- Download stories too. Posts and reels have a download button; stories do not yet. `/api/v1/feed/reels_media/?reel_ids=<user id>` answers with the user's current stories, but trying it live means opening someone's story, which tells them you watched it, so pick the account with the user first.
 
 ## Footprint cleaners for other platforms
 
