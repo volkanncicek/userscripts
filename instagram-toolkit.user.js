@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.21.5
+// @version      2026.10.21.6
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -220,11 +220,33 @@
     [...document.querySelectorAll(SELECTORS.dialog)].filter((el) => el.querySelectorAll("select").length === 6);
   const isShown = (element) => element.getClientRects().length > 0;
 
-  // A run stopped after a batch with the filter dialog still open, which Escape at the dialog closes every time it is tried by hand, so Escape also goes to whatever has focus and to the page before giving up, and a dialog left in the page but no longer shown counts as closed. The stop message counts the filter dialogs, since a second, stale one is the suspect.
+  // The close button is an unlabelled icon drawn with a CSS mask, measured as the only masked element in the dialog; the click lands on its clickable wrapper.
+  function closeButton(dialog) {
+    let button = [...dialog.querySelectorAll("*")].find((el) => {
+      const mask = getComputedStyle(el).maskImage;
+      return mask && mask !== "none";
+    });
+    while (
+      button?.parentElement &&
+      button.parentElement !== dialog &&
+      getComputedStyle(button.parentElement).cursor === "pointer"
+    ) {
+      button = button.parentElement;
+    }
+    return button ?? null;
+  }
+
+  // Runs stopped with the filter dialog still open after Escape, at the dialog, at the focused element and at the page, so the close button comes first and Escape is the fallback. A dialog left in the page but no longer shown counts as closed.
   async function closeDialog(dialog) {
     const closed = () => !dialog.isConnected || !isShown(dialog);
-    for (const target of [dialog, document.activeElement, document]) {
-      pressEscape(target);
+    const attempts = [
+      () => closeButton(dialog)?.click(),
+      () => pressEscape(dialog),
+      () => pressEscape(document.activeElement),
+      () => pressEscape(document),
+    ];
+    for (const attempt of attempts) {
+      attempt();
       try {
         await waitFor("the filter dialog to close", closed, CONFIG.uiTimeoutMs / 2);
         return;
@@ -234,7 +256,7 @@
     }
     const all = filterDialogs();
     throw new Error(
-      `The filter dialog did not close after Escape (${all.length} filter dialogs on the page, ${all.filter(isShown).length} shown).`,
+      `The filter dialog did not close from its close button or Escape (${all.length} filter dialogs on the page, ${all.filter(isShown).length} shown).`,
     );
   }
 
