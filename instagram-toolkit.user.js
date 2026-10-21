@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.21.4
+// @version      2026.10.21.5
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -214,8 +214,29 @@
   }
 
   // The filter dialog has no labelled close button; Escape is what closes it.
-  const closeDialog = (dialog) =>
-    dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, bubbles: true }));
+  const pressEscape = (target) =>
+    target?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, bubbles: true }));
+  const filterDialogs = () =>
+    [...document.querySelectorAll(SELECTORS.dialog)].filter((el) => el.querySelectorAll("select").length === 6);
+  const isShown = (element) => element.getClientRects().length > 0;
+
+  // A run stopped after a batch with the filter dialog still open, which Escape at the dialog closes every time it is tried by hand, so Escape also goes to whatever has focus and to the page before giving up, and a dialog left in the page but no longer shown counts as closed. The stop message counts the filter dialogs, since a second, stale one is the suspect.
+  async function closeDialog(dialog) {
+    const closed = () => !dialog.isConnected || !isShown(dialog);
+    for (const target of [dialog, document.activeElement, document]) {
+      pressEscape(target);
+      try {
+        await waitFor("the filter dialog to close", closed, CONFIG.uiTimeoutMs / 2);
+        return;
+      } catch (error) {
+        if (stopReason) throw error;
+      }
+    }
+    const all = filterDialogs();
+    throw new Error(
+      `The filter dialog did not close after Escape (${all.length} filter dialogs on the page, ${all.filter(isShown).length} shown).`,
+    );
+  }
 
   const toLocalDate = (year, month, day) => new Date(Number(year), Number(month) - 1, Number(day));
 
@@ -259,9 +280,8 @@
     const toolbar = await openType(type);
     if (!toolbar) return null;
     toolbar.click();
-    const dialog = await waitFor("the filter dialog", () =>
-      [...document.querySelectorAll(SELECTORS.dialog)].find((el) => el.querySelectorAll("select").length === 6),
-    );
+    // The newest shown one, so a stale dialog left in the page is never the one filled in.
+    const dialog = await waitFor("the filter dialog", () => filterDialogs().filter(isShown).at(-1));
     const reset = textElement(LABELS.reset, dialog);
     if (reset) {
       reset.click();
@@ -279,8 +299,7 @@
     const dialog = await openResetFilterDialog(type);
     if (!dialog) return null;
     const [start] = datesIn(dialog);
-    closeDialog(dialog);
-    await waitFor("the filter dialog to close", () => !document.contains(dialog));
+    await closeDialog(dialog);
     return start;
   }
 
@@ -323,14 +342,13 @@
           .join() === wanted,
       CONFIG.uiStepMs * 10,
     ).catch(() => {
-      closeDialog(dialog);
+      pressEscape(dialog);
       throw new Error(`Instagram did not accept the range ${start.toLocaleDateString()}–${end.toLocaleDateString()}.`);
     });
     // Apply stays disabled when the filter already matches, in which case the list is already the one wanted and only the dialog needs closing.
     const apply = buttonWithText(dialog, LABELS.apply);
     if (apply.getAttribute("aria-disabled") === "true") {
-      closeDialog(dialog);
-      await waitFor("the filter dialog to close", () => !document.contains(dialog));
+      await closeDialog(dialog);
     } else {
       // Measured: Apply usually replaces the list's content within about 200 ms and the filtered list arrives seconds later, but Instagram can also keep the old list showing until the new one is ready. The old list's first row, or its "No results" element when it was empty, going away is the proof it was replaced, so no row of it can be selected. The spinner in between can be shown for only 300 ms, which a background tab's throttled timers miss, and a long list keeps a load-more spinner at its foot anyway, so it is the fallback only for a list that showed neither. A list that never visibly turns over stops the run.
       const before = listRow() || textElement(LABELS.noResults, listArea() ?? document);
