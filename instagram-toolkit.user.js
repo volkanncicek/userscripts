@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.21.8
+// @version      2026.10.21.9
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -39,13 +39,13 @@
     batchSize: 20,
     batchPauseMs: 20000,
     pauseJitter: 0.15,
-    longPauseEveryBatches: 10,
+    longPauseEveryBatches: 5,
     longPauseMinMs: 180000,
     longPauseMaxMs: 300000,
     watchIntervalMs: 500,
     maxAncestorSteps: 6,
-    runCap: 300,
-    dailyCap: 1000,
+    runCap: 150,
+    dailyCap: 500,
     minFrameWidth: 150,
     heightTolerancePx: 2,
     pageUpdateDebounceMs: 100,
