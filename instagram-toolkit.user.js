@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.21.6
+// @version      2026.10.21.7
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -34,6 +34,7 @@
     listQuietMs: 60000,
     selectStepMs: 400,
     confirmTimeoutMs: 20000,
+    maxToastChars: 120,
     batchSize: 20,
     batchPauseMs: 20000,
     pauseJitter: 0.15,
@@ -523,6 +524,29 @@
     progress.byType[type.key] = (progress.byType[type.key] ?? 0) + count;
   }
 
+  // A run stopped on a third batch whose done message never counted, after two that did. Instagram can put a new message into a toast element that is already in the page, which a search for new elements misses, so any change to the page after the click whose text reads as the done message counts. Returns that text, or null on timeout.
+  async function doneMessageAfter(type, act) {
+    let found = null;
+    const check = (node) => {
+      const element = node?.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+      const text = element?.textContent?.trim() ?? "";
+      if (!found && text.length < CONFIG.maxToastChars && type.done.test(text)) found = text;
+    };
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        check(record.target);
+        record.addedNodes.forEach(check);
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    try {
+      act();
+      return await waitEvenIfStopped(() => found, CONFIG.confirmTimeoutMs);
+    } finally {
+      observer.disconnect();
+    }
+  }
+
   // Rows are always taken from the top of the oldest-first list, never from wherever the list happens to be scrolled, so a batch is always the oldest items left.
   async function deleteBatch(type, size, progress) {
     await enterSelectMode();
@@ -535,25 +559,24 @@
     const counter = textsMatching(/^\d+ selected$/)[0];
     const selected = Number(counter?.innerText.match(/\d+/)[0] ?? 0);
     if (selected === 0) throw new Error("Nothing could be selected although the list is not empty.");
-    const earlierToasts = new Set(textsMatching(type.done));
     // The action button shares the selection bar with the "N selected" counter; searching only there keeps a comment that happens to read "Delete" from being clicked instead.
     (await waitFor(`the "${type.action}" button`, () => selectionBarButton(counter, type.action))).click();
-    const confirm = await waitFor("the confirmation dialog", () =>
+    const confirmDialog = () =>
       [...document.querySelectorAll(SELECTORS.dialog)]
         .map((dialog) => buttonWithText(dialog, type.action))
-        .find(Boolean),
-    );
-    confirm.click();
+        .find(Boolean);
+    const confirm = await waitFor("the confirmation dialog", confirmDialog);
     // Once confirmed the items may already be gone, so the outcome is waited for even through a stop and counted before the stop is honoured; an unconfirmed batch is counted as fully removed so the daily cap never runs low.
-    const toast = await waitEvenIfStopped(
-      () => textsMatching(type.done).find((el) => !earlierToasts.has(el)),
-      CONFIG.confirmTimeoutMs,
-    );
-    if (!toast) {
+    const toastText = await doneMessageAfter(type, () => confirm.click());
+    if (!toastText) {
       countRemoved(type, progress, selected);
-      throw new Error(`Instagram did not confirm the last batch; up to ${selected} items may have been removed.`);
+      // This stop has not been reproduced by hand, so the message says what the page still showed.
+      const left = `${confirmDialog() ? "the confirmation dialog was still open" : "the confirmation dialog had closed"}, ${textElement(LABELS.cancel) ? "the selection was still on" : "the selection had ended"}`;
+      throw new Error(
+        `Instagram did not confirm the last batch (${left}); up to ${selected} items may have been removed.`,
+      );
     }
-    const removed = Math.min(selected, Number(toast.innerText.match(type.done)[1]));
+    const removed = Math.min(selected, Number(toastText.match(type.done)[1]));
     countRemoved(type, progress, removed);
     if (removed < selected) requestStop(`Instagram removed only ${removed} of ${selected} selected items.`);
     await waitFor("select mode to end", () => !textElement(LABELS.cancel));
