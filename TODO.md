@@ -2,6 +2,7 @@
 
 ## Instagram Toolkit
 
+- Resume removing likes on or before 2016-12-31. On 2026-10-21 about 140 were removed, all from the oldest end of 2015, and Instagram began slowing down: the done message took 45 s, then 3.5 min, and still 80 s several hours later. Resume after at least 12 h with the tab in front; if the first batch's done message takes more than a few seconds, stop for the day. The user approved deleting everything on or before 2016-12-31.
 - The story download needs the story's id in the address, which the viewer adds only after stepping to another story, so the story it opens on asks the user to step away and back. Reading the opening story's id would mean the user's id for `/api/v1/feed/reels_media/?reel_ids=`, and `/api/v1/users/web_profile_info/` answered 429 after three requests on 2026-10-20. Highlights are left out because their address carries the highlight's id.
 
 ## Footprint cleaners for other platforms
