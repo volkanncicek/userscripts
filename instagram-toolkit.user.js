@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.21.2
+// @version      2026.10.21.3
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -142,6 +142,7 @@
   let stopReason = null;
   let running = false;
   let pageUpdateTimer;
+  let hiddenTotalMs = 0;
   // Instagram's list pages arrive through this endpoint; tracking them is what tells a list that is still loading from one that is complete.
   const PAGE_REQUEST = /\/async\/wbloks\/fetch/;
   const pageRequests = { inFlight: new Set(), completed: 0 };
@@ -159,9 +160,24 @@
     if (stopReason) throw new Error(stopReason);
   }
 
+  // Instagram does not reliably update a page whose tab is in the background: the stops that could not be reproduced (a filtered list left showing its old rows, a dialog left open) all happened with the tab hidden. So every wait holds while the tab is hidden, and that time counts against no deadline. Returns how long it held.
+  async function holdWhileHidden(honourStop = true) {
+    const start = Date.now();
+    while (document.hidden) {
+      if (honourStop) checkStop();
+      await sleep(500);
+    }
+    const held = Date.now() - start;
+    hiddenTotalMs += held;
+    return held;
+  }
+  // A clock that stands still while the tab is hidden, for the loops that keep their own timers.
+  const visibleNow = () => Date.now() - hiddenTotalMs;
+
   async function waitEvenIfStopped(probe, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
+    let deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      deadline += await holdWhileHidden(false);
       const found = probe();
       if (found) return found;
       await sleep(150);
@@ -170,9 +186,10 @@
   }
 
   async function waitFor(what, probe, timeoutMs = CONFIG.uiTimeoutMs) {
-    const deadline = Date.now() + timeoutMs;
+    let deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       checkStop();
+      deadline += await holdWhileHidden();
       const found = probe();
       if (found) return found;
       await sleep(150);
@@ -181,10 +198,11 @@
   }
 
   async function pause(ms) {
-    const until = Date.now() + ms;
+    let until = Date.now() + ms;
     while (Date.now() < until) {
       checkStop();
-      await sleep(Math.min(500, until - Date.now()));
+      until += await holdWhileHidden();
+      await sleep(Math.max(0, Math.min(500, until - Date.now())));
     }
   }
 
@@ -375,16 +393,16 @@
 
   // Measured on the likes list: each next page is a request to Instagram that takes 1-6 s, and a new one is only sent when the list is scrolled from well above its foot back down to it, which is what scrolling by hand does; scrolling to a foot it is already at sends nothing. The load-more spinner also stays after the last page, so it cannot say when the list is complete. So the list is asked for more only while no page request is in flight, it counts as complete once pages come back adding nothing, and it stops the count if nothing new arrives for too long. A request left unanswered past its give-up time no longer counts as in flight, since waiting on it would keep the list from ever being asked again. Reading a long list quickly is itself what Instagram treats as automation, hence the walking pace.
   async function loadAllRows(where) {
-    const deadline = Date.now() + CONFIG.loadTimeoutMs;
+    const deadline = visibleNow() + CONFIG.loadTimeoutMs;
     let seen = rowToggles().length;
-    let lastGrowth = Date.now();
+    let lastGrowth = visibleNow();
     let completedAtGrowth = pageRequests.completed;
     const pendingSince = () =>
       [...pageRequests.inFlight]
         .map((request) => request.startedAt)
         .filter((startedAt) => Date.now() - startedAt < CONFIG.requestGiveUpMs);
     while (pageRequests.completed - completedAtGrowth < CONFIG.emptyPagesToFinish || pendingSince().length > 0) {
-      if (Date.now() > deadline) throw new Error(`The ${where} list did not finish loading, so nothing was counted.`);
+      if (visibleNow() > deadline) throw new Error(`The ${where} list did not finish loading, so nothing was counted.`);
       const scroller = scrollableAncestor(rowToggles().at(-1));
       if (scroller && pendingSince().length === 0) {
         scroller.scrollTop = 0;
@@ -395,13 +413,13 @@
       const now = rowToggles().length;
       if (now > seen) {
         seen = now;
-        lastGrowth = Date.now();
+        lastGrowth = visibleNow();
         completedAtGrowth = pageRequests.completed;
       }
-      if (Date.now() - lastGrowth > CONFIG.loadStallMs) {
+      if (visibleNow() - lastGrowth > CONFIG.loadStallMs) {
         // This stop has not been reproduced by hand, so the message carries what tells its causes apart.
         const unanswered = pageRequests.inFlight.size;
-        const seconds = Math.round((Date.now() - lastGrowth) / 1000);
+        const seconds = Math.round((visibleNow() - lastGrowth) / 1000);
         throw new Error(
           `Instagram stopped loading the ${where} list after ${seen} items: nothing new for ${seconds} s, ${pageRequests.completed - completedAtGrowth} list requests answered since, ${unanswered} unanswered. Nothing was counted; it may be slowing down activity, so try again later.`,
         );
@@ -1048,7 +1066,7 @@
       }),
     );
     showStatus(
-      `Today's allowance: ${remainingDailyAllowance()} of ${CONFIG.dailyCap}. The chosen day itself is kept as a time-zone margin.`,
+      `Today's allowance: ${remainingDailyAllowance()} of ${CONFIG.dailyCap}. The chosen day itself is kept as a time-zone margin. A run waits while this tab is in the background and carries on when you come back.`,
     );
     control("stop").addEventListener("click", () => requestStop("Stopped by you."));
     if (!isEnglishUi()) {
