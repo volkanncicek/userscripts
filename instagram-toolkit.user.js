@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.21
+// @version      2026.10.21.1
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -169,7 +169,7 @@
     return null;
   }
 
-  async function waitFor(probe, timeoutMs = CONFIG.uiTimeoutMs) {
+  async function waitFor(what, probe, timeoutMs = CONFIG.uiTimeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       checkStop();
@@ -177,7 +177,7 @@
       if (found) return found;
       await sleep(150);
     }
-    throw new Error(`Timed out waiting for the page (${probe.name || "condition"})`);
+    throw new Error(`Waited ${Math.round(timeoutMs / 1000)} s for ${what}, which did not come.`);
   }
 
   async function pause(ms) {
@@ -217,15 +217,21 @@
     const path = `${ACTIVITY_PATH}${type.path}`;
     if (currentPath() !== path) {
       activePath = null;
-      const tab = await waitFor(() => document.querySelector(`${SELECTORS.tab}[href="${path}"]`));
+      const tab = await waitFor(`the ${type.label} tab`, () =>
+        document.querySelector(`${SELECTORS.tab}[href="${path}"]`),
+      );
       tab.click();
       // The previous tab's toolbar lingers for a moment after the URL changes, so wait for the new tab to be selected and its list to settle before using the toolbar.
-      await waitFor(() => currentPath() === path && tab.getAttribute("aria-selected") === "true");
+      await waitFor(
+        `the ${type.label} tab to open`,
+        () => currentPath() === path && tab.getAttribute("aria-selected") === "true",
+      );
       await sleep(CONFIG.listSettleMs);
     }
     activePath = path;
     // A tab that has never held anything (measured on Reviews: "No review activity") shows no toolbar at all, so it is reported as empty instead of waiting for a Sort & Filter button that will not come.
     const found = await waitFor(
+      "the Sort & Filter button",
       () =>
         buttonWithText(document, LABELS.sortFilter) ||
         textsMatching(EMPTY_TAB_TEXT).find((el) => listArea()?.contains(el)),
@@ -241,7 +247,7 @@
     const toolbar = await openType(type);
     if (!toolbar) return null;
     toolbar.click();
-    const dialog = await waitFor(() =>
+    const dialog = await waitFor("the filter dialog", () =>
       [...document.querySelectorAll(SELECTORS.dialog)].find((el) => el.querySelectorAll("select").length === 6),
     );
     const reset = textElement(LABELS.reset, dialog);
@@ -262,7 +268,7 @@
     if (!dialog) return null;
     const [start] = datesIn(dialog);
     closeDialog(dialog);
-    await waitFor(() => !document.contains(dialog));
+    await waitFor("the filter dialog to close", () => !document.contains(dialog));
     return start;
   }
 
@@ -298,6 +304,7 @@
     // React re-renders the selects after each change, so the values are read back once they settle rather than straight away.
     const wanted = [start, end].map((date) => date.toDateString()).join();
     await waitFor(
+      "the dates to settle",
       () =>
         datesIn(dialog)
           .map((date) => date.toDateString())
@@ -311,12 +318,13 @@
     const apply = buttonWithText(dialog, LABELS.apply);
     if (apply.getAttribute("aria-disabled") === "true") {
       closeDialog(dialog);
-      await waitFor(() => !document.contains(dialog));
+      await waitFor("the filter dialog to close", () => !document.contains(dialog));
     } else {
       // Measured: Apply usually replaces the list's content within about 200 ms and the filtered list arrives seconds later, but Instagram can also keep the old list showing until the new one is ready. The old list's first row, or its "No results" element when it was empty, going away is the proof it was replaced, so no row of it can be selected. The spinner in between can be shown for only 300 ms, which a background tab's throttled timers miss, and a long list keeps a load-more spinner at its foot anyway, so it is the fallback only for a list that showed neither. A list that never visibly turns over stops the run.
       const before = listRow() || textElement(LABELS.noResults, listArea() ?? document);
       apply.click();
       await waitFor(
+        "the filtered list",
         () => (before ? !before.isConnected : document.querySelector(SELECTORS.loading) || listRow()),
         CONFIG.turnoverTimeoutMs,
       ).catch(() => {
@@ -333,6 +341,7 @@
     }
     // An empty list shows no load-more spinner, so "No results" counts only once loading has stopped; a non-empty list is ready as soon as its first row is there.
     await waitFor(
+      "the filtered list to load",
       () => listRow() || (listIsEmpty() && !document.querySelector(SELECTORS.loading)),
       CONFIG.loadTimeoutMs,
     );
@@ -346,13 +355,13 @@
 
   async function enterSelectMode() {
     if (textElement(LABELS.cancel)) return;
-    (await waitFor(() => textElement(LABELS.select))).click();
-    await waitFor(() => textElement(LABELS.cancel));
+    (await waitFor(`the "${LABELS.select}" button`, () => textElement(LABELS.select))).click();
+    await waitFor("select mode", () => textElement(LABELS.cancel));
   }
 
   async function exitSelectMode() {
     textElement(LABELS.cancel)?.click();
-    await waitFor(() => !textElement(LABELS.cancel));
+    await waitFor("select mode to end", () => !textElement(LABELS.cancel));
   }
 
   function scrollableAncestor(el) {
@@ -490,8 +499,8 @@
     if (selected === 0) throw new Error("Nothing could be selected although the list is not empty.");
     const earlierToasts = new Set(textsMatching(type.done));
     // The action button shares the selection bar with the "N selected" counter; searching only there keeps a comment that happens to read "Delete" from being clicked instead.
-    (await waitFor(() => selectionBarButton(counter, type.action))).click();
-    const confirm = await waitFor(() =>
+    (await waitFor(`the "${type.action}" button`, () => selectionBarButton(counter, type.action))).click();
+    const confirm = await waitFor("the confirmation dialog", () =>
       [...document.querySelectorAll(SELECTORS.dialog)]
         .map((dialog) => buttonWithText(dialog, type.action))
         .find(Boolean),
@@ -509,7 +518,7 @@
     const removed = Math.min(selected, Number(toast.innerText.match(type.done)[1]));
     countRemoved(type, progress, removed);
     if (removed < selected) requestStop(`Instagram removed only ${removed} of ${selected} selected items.`);
-    await waitFor(() => !textElement(LABELS.cancel));
+    await waitFor("select mode to end", () => !textElement(LABELS.cancel));
   }
 
   // The daily allowance is re-read before every batch rather than once per run, so two tabs running on the same day cannot each spend the whole of it.
@@ -1014,7 +1023,9 @@
         await task(types, cutoff, progress);
       } catch (error) {
         // A stop surfaces as whatever wait it interrupted, which may rewrap it, so the recorded reason wins over the error's own message.
-        showStatus(`${removedSummary(progress)}Stopped: ${stopReason ?? error.message}`);
+        // The progress line names the list and year being worked on, which most stop reasons do not, so it is kept in the message.
+        const lastStep = control("status").textContent.endsWith("…") ? ` at "${control("status").textContent}"` : "";
+        showStatus(`${removedSummary(progress)}Stopped${lastStep}: ${stopReason ?? error.message}`);
       } finally {
         stopWatching();
         running = false;
