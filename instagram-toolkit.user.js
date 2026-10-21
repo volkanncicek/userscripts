@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.21.7
+// @version      2026.10.21.8
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -33,7 +33,8 @@
     loadTimeoutMs: 600000,
     listQuietMs: 60000,
     selectStepMs: 400,
-    confirmTimeoutMs: 20000,
+    // Instagram's done message can arrive long after the confirmation dialog and the selection are gone, so this wait is generous.
+    confirmTimeoutMs: 120000,
     maxToastChars: 120,
     batchSize: 20,
     batchPauseMs: 20000,
