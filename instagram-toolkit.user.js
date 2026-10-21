@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.20.7
+// @version      2026.10.21
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -25,6 +25,8 @@
   const CONFIG = {
     defaultCutoff: "2018-12-31",
     uiTimeoutMs: 10000,
+    // Instagram sometimes keeps the old list on screen until the filtered one arrives, and that arrival was measured taking over 15 s.
+    turnoverTimeoutMs: 60000,
     uiStepMs: 300,
     listSettleMs: 3000,
     scrollPauseMs: 2000,
@@ -311,12 +313,12 @@
       closeDialog(dialog);
       await waitFor(() => !document.contains(dialog));
     } else {
-      // Measured: Apply replaces the list's content within about 100 ms and the filtered list arrives 1-3 s later. The old list's first row, or its "No results" element when it was empty, going away is the proof it was replaced, so no row of it can be selected. The spinner in between can be shown for only 300 ms, which a background tab's throttled timers miss, and a long list keeps a load-more spinner at its foot anyway, so it is the fallback only for a list that showed neither. A list that never visibly turns over stops the run.
+      // Measured: Apply usually replaces the list's content within about 200 ms and the filtered list arrives seconds later, but Instagram can also keep the old list showing until the new one is ready. The old list's first row, or its "No results" element when it was empty, going away is the proof it was replaced, so no row of it can be selected. The spinner in between can be shown for only 300 ms, which a background tab's throttled timers miss, and a long list keeps a load-more spinner at its foot anyway, so it is the fallback only for a list that showed neither. A list that never visibly turns over stops the run.
       const before = listRow() || textElement(LABELS.noResults, listArea() ?? document);
       apply.click();
       await waitFor(
         () => (before ? !before.isConnected : document.querySelector(SELECTORS.loading) || listRow()),
-        CONFIG.uiTimeoutMs,
+        CONFIG.turnoverTimeoutMs,
       ).catch(() => {
         // This stop has not been reproduced by hand, so the message carries what tells its causes apart: which list and range, whether the dialog took the click, and what the list showed before.
         const range = `${start.toLocaleDateString()}–${end.toLocaleDateString()}`;

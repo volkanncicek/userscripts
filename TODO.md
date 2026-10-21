@@ -13,7 +13,7 @@ Same shape as the Instagram cleaner: a cutoff, count first, oldest year first, p
 
 ## Known limits of the Instagram cleaner
 
-- Count still stopped with "Instagram did not refresh the list after the filter was applied" on 2026.10.20.1, after the fix that waits for the old "No results" element to go. The message now names the list, the range, whether the dialog closed and what the list showed; change the turnover check only once a stop has reported those.
+- Count stopped with "did not refresh the Likes list for 2015 (the filter dialog closed; the old first row stayed)" on 2026.10.20.7: Instagram took the filter but kept the old list showing past the 10 s wait, and a filtered list was measured arriving after more than 15 s. 2026.10.21 waits up to 60 s; if it stops again, the next suspect is a background tab, which this harness could not reproduce.
 - Count also stopped with "Instagram stopped loading more items" on 2026.10.20.6. A list request that never settled kept the loop from asking for more, which 2026.10.20.7 fixes by giving such a request up after 30 s; the message now names the list and year, the items loaded, and the answered and unanswered requests since the last growth. Whether the `unsafeWindow.fetch` wrapper sees Instagram's requests inside Tampermonkey (rather than in a page-level test) is still unverified; an "answered 0" in that message would say it does not.
 - On 2026-10-20 Story replies showed that empty state on every load, shortly after a few replies had been deleted by hand; check whether any were left and the list is failing to load, or the tab is genuinely empty.
 - The 429 hook has never fired live, so whether Instagram signals limits that way is unverified.
