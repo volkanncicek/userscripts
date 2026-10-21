@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram Toolkit
 // @namespace    github.com/volkanncicek/userscripts
-// @version      2026.10.21.9
+// @version      2026.10.21.10
 // @updateURL    https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @downloadURL  https://raw.githubusercontent.com/volkanncicek/userscripts/main/instagram-toolkit.user.js
 // @description  Cleans up your old Instagram activity (comments, likes, reposts, story replies and reviews from before a date you pick, slowly and only when you start it), shows "3 of 5" in galleries, steps through gallery photos and posts with the arrow keys, downloads photos and videos at full size, and keeps links in your own language.
@@ -571,10 +571,10 @@
     const toastText = await doneMessageAfter(type, () => confirm.click());
     if (!toastText) {
       countRemoved(type, progress, selected);
-      // This stop has not been reproduced by hand, so the message says what the page still showed.
+      // Watched live: the done message came later and later as a day's removals added up, which is how Instagram's slowing down first shows, so the message says what the page still showed and what to do.
       const left = `${confirmDialog() ? "the confirmation dialog was still open" : "the confirmation dialog had closed"}, ${textElement(LABELS.cancel) ? "the selection was still on" : "the selection had ended"}`;
       throw new Error(
-        `Instagram did not confirm the last batch (${left}); up to ${selected} items may have been removed.`,
+        `Instagram did not confirm the last batch within ${Math.round(CONFIG.confirmTimeoutMs / 60000)} minutes (${left}); up to ${selected} items may have been removed. A confirmation this slow is Instagram slowing you down: continue in a few hours, or tomorrow.`,
       );
     }
     const removed = Math.min(selected, Number(toastText.match(type.done)[1]));
