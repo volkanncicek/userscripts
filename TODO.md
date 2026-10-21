@@ -9,7 +9,7 @@
 
 Same shape as the Instagram cleaner: a cutoff, count first, oldest year first, paced batches under run and daily caps, stop on any sign of a restriction, ask before any trial deletion. Each starts with a design conversation.
 
-- X (Twitter): its web UI has no date-filtered bulk delete; research whether the account archive plus the web UI is the way.
+- X (Twitter): its web UI has no date-filtered bulk delete, but search does the filtering. Recon on 2026-10-21: the account dates from November 2011 and shows its post count on the profile; `from:<handle> since:… until:…` on the Latest tab lists the user's own old tweets with dates (the results render several seconds after load, so wait before reading them). The UI is in Turkish, and X marks its controls with `data-testid` attributes, so a cleaner need not depend on the UI language. Likes carry no date in the web UI and are a separate question. Parked by the user, no hurry; the design conversation has not started.
 - Facebook: Activity Log appears to offer date filters and bulk actions; verify live.
 
 ## Known limits of the Instagram cleaner
